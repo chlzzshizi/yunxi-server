@@ -99,8 +99,7 @@ CREATE TABLE order_items (
     wash_type_id BIGINT         NOT NULL COMMENT '洗涤方式ID',
     quantity     INT            NOT NULL DEFAULT 1 COMMENT '数量',
     unit_price   DECIMAL(10,2)  NOT NULL COMMENT '单价',
-    barcode      VARCHAR(50)    DEFAULT NULL COMMENT '条码（门店单）',
-    photos       VARCHAR(1000)  DEFAULT NULL COMMENT '衣物照片URL，逗号分隔（网单）',
+    photos       VARCHAR(1000)  DEFAULT NULL COMMENT '衣物照片URL，逗号分隔',
     PRIMARY KEY (id),
     KEY idx_order_id (order_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='订单明细';

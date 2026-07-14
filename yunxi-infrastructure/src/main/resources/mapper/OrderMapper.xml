@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.yunxi.infrastructure.persistence.mapper.OrderMapper">
+
+    <!-- 结果映射：数据库列名 → PO 字段名 -->
+    <resultMap id="OrderResultMap" type="com.yunxi.infrastructure.persistence.po.OrderPO">
+        <id     column="id"               property="id"/>
+        <result column="order_no"         property="orderNo"/>
+        <result column="store_id"         property="storeId"/>
+        <result column="customer_id"      property="customerId"/>
+        <result column="staff_id"         property="staffId"/>
+        <result column="source"           property="source"/>
+        <result column="status"           property="status"/>
+        <result column="total_amount"     property="totalAmount"/>
+        <result column="paid_amount"      property="paidAmount"/>
+        <result column="pay_method"       property="payMethod"/>
+        <result column="final_pay_method" property="finalPayMethod"/>
+        <result column="appointment_time" property="appointmentTime"/>
+        <result column="delivery_address" property="deliveryAddress"/>
+        <result column="express_no"       property="expressNo"/>
+        <result column="remark"           property="remark"/>
+        <result column="finish_time"      property="finishTime"/>
+        <result column="create_time"      property="createTime"/>
+    </resultMap>
+    <!-- 插入订单 -->
+    <insert id="insert" parameterType="com.yunxi.infrastructure.persistence.po.OrderPO"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO orders (
+            order_no, store_id, customer_id, staff_id,
+            source, status, total_amount, paid_amount,
+            pay_method, final_pay_method,
+            appointment_time, delivery_address, express_no,
+            remark, finish_time, create_time
+        ) VALUES (
+                     #{orderNo}, #{storeId}, #{customerId}, #{staffId},
+                     #{source}, #{status}, #{totalAmount}, #{paidAmount},
+                     #{payMethod}, #{finalPayMethod},
+                     #{appointmentTime}, #{deliveryAddress}, #{expressNo},
+                     #{remark}, #{finishTime}, #{createTime}
+                 )
+    </insert>
+    <!-- 根据 ID 查询 -->
+    <select id="selectById" resultMap="OrderResultMap">
+        SELECT * FROM orders WHERE id = #{id}
+    </select>
+
+    <!-- 根据订单编号查询 -->
+    <select id="selectByOrderNo" resultMap="OrderResultMap">
+        SELECT * FROM orders WHERE order_no = #{orderNo}
+    </select>
+
+    <!-- 更新订单状态 -->
+    <update id="updateStatus" parameterType="com.yunxi.infrastructure.persistence.po.OrderPO">
+        UPDATE orders
+        SET status           = #{status},
+            paid_amount      = #{paidAmount},
+            final_pay_method = #{finalPayMethod},
+            finish_time      = #{finishTime}
+        WHERE id = #{id}
+    </update>
+
+</mapper>

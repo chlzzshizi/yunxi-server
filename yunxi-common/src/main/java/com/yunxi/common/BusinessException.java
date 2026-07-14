@@ -1,4 +1,4 @@
-package com.yunxi.common.enums;
+package com.yunxi.common;
 
 public class BusinessException extends RuntimeException {
     private  final int code;

@@ -1,4 +1,4 @@
-package com.yunxi.common.enums;
+package com.yunxi.common;
 
 public record Result<T>(int code, String message, T data) {
     public  static <T> Result<T> ok(T data) {

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.yunxi.infrastructure.persistence.mapper.OrderItemMapper">
+
+    <!-- 结果映射 -->
+    <resultMap id="OrderItemResultMap"
+               type="com.yunxi.infrastructure.persistence.po.OrderItemPO">
+        <id     column="id"            property="id"/>
+        <result column="order_id"      property="orderId"/>
+        <result column="category_id"   property="categoryId"/>
+        <result column="wash_type_id"  property="washTypeId"/>
+        <result column="quantity"      property="quantity"/>
+        <result column="unit_price"    property="unitPrice"/>
+        <result column="photos"        property="photos"/>
+    </resultMap>
+
+    <!-- 批量插入明细 -->
+    <insert id="insertBatch">
+        INSERT INTO order_items (
+        order_id, category_id, wash_type_id,
+        quantity, unit_price, photos
+        ) VALUES
+        <foreach collection="list" item="item" separator=",">
+            (
+            #{item.orderId}, #{item.categoryId}, #{item.washTypeId},
+            #{item.quantity}, #{item.unitPrice}, #{item.photos}
+            )
+        </foreach>
+    </insert>
+
+    <!-- 根据订单 ID 查询所有明细 -->
+    <select id="selectByOrderId" resultMap="OrderItemResultMap">
+        SELECT * FROM order_items WHERE order_id = #{orderId}
+    </select>
+
+</mapper>
