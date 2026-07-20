@@ -7,7 +7,7 @@ services:
       MYSQL_DATABASE: yunxi
       TZ: Asia/Shanghai
     ports:
-      - "3306:3306"D:\study\yunxi-server
+      - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     command:
