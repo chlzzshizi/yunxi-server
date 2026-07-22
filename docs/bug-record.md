@@ -154,7 +154,7 @@ case DELIVERED:          // 7 → 8（网单同样需要校验）
 
 ---
 
-## Bug 4：BusinessException 显示为 500（待修复）
+## Bug 4：BusinessException 显示为 500（已修复）
 
 ### 现象
 
@@ -181,9 +181,24 @@ case DELIVERED:          // 7 → 8（网单同样需要校验）
 
 没有配置全局异常处理器。`BusinessException` 抛出来后，Spring 默认把它当作未处理异常，统一返回 500。
 
-### 待修复
+### 修复
 
-下一步写 `@RestControllerAdvice` 全局异常处理，将 `BusinessException` 转换为 `Result.fail()`。
+在 `yunxi-interfaces` 模块新建 `GlobalExceptionHandler.java`，用 `@RestControllerAdvice` 拦截异常：
+
+- `BusinessException` → `Result.fail(e.getCode(), e.getMessage())`
+- `IllegalArgumentException` → `Result.fail(400, msg)`
+- `Exception`（兜底）→ `Result.fail(500, "服务器内部错误")`
+
+### 效果
+
+```json
+{"code": 400, "message": "当前状态不允许推进: 状态=8", "data": null}
+```
+
+### 教训
+
+- `@RestControllerAdvice` 是全局异常拦截网，不需要在每个 Controller 写 try-catch
+- `@ExceptionHandler` 按异常类型匹配，越具体的越优先匹配
 
 ---
 
