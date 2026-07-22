@@ -51,12 +51,15 @@
         SELECT * FROM orders WHERE order_no = #{orderNo}
     </select>
 
-    <!-- 更新订单状态 -->
-    <update id="updateStatus" parameterType="com.yunxi.infrastructure.persistence.po.OrderPO">
+    <!-- 更新订单 -->
+    <update id="update" parameterType="com.yunxi.infrastructure.persistence.po.OrderPO">
         UPDATE orders
         SET status           = #{status},
             paid_amount      = #{paidAmount},
+            pay_method       = #{payMethod},
             final_pay_method = #{finalPayMethod},
+            staff_id         = #{staffId},
+            express_no       = #{expressNo},
             finish_time      = #{finishTime}
         WHERE id = #{id}
     </update>

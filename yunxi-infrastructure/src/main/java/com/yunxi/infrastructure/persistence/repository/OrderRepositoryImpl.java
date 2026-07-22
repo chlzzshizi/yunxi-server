@@ -33,12 +33,16 @@ public class OrderRepositoryImpl implements OrderRepository {
     public void save(Order order) {
         // 1. Order → OrderPO
         OrderPO po = toOrderPO(order);
-        // 2. 插入订单
-        orderMapper.insert(po);
-        // 3. 插入返回的自增 id 写回 Order
-        order.setId(po.getId());
-        // 4. 插入明细（没明细就没啥可插的）
-        if (!order.getItems().isEmpty()) {
+        // 2. 判断是否新建
+        boolean isNew = order.getId() == null;
+        if (isNew) {
+            orderMapper.insert(po);
+            order.setId(po.getId());
+        } else {
+            orderMapper.update(po);
+        }
+        // 3. 只在新建时插入明细，更新时不重复插
+        if (isNew && !order.getItems().isEmpty()) {
             List<OrderItemPO> itemPOs = toOrderItemPOs(order);
             orderItemMapper.insertBatch(itemPOs);
         }

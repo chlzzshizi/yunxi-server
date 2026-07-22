@@ -36,7 +36,7 @@
         <druid.version>1.2.23</druid.version>
         <jjwt.version>0.12.6</jjwt.version>
         <springdoc.version>2.6.0</springdoc.version>
-        <knife4j.version>4.5.0</knife4j.version>
+        <knife4j.version>4.4.0</knife4j.version>
         <mapstruct.version>1.6.3</mapstruct.version>
         <lombok.version>1.18.36</lombok.version>
     </properties>

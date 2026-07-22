@@ -75,6 +75,9 @@ public class Order {
                 }
                 break;
             case PENDING_PICKUP:     // 5 → 8
+                if (this.paidAmount.compareTo(this.totalAmount) < 0) {
+                    throw new BusinessException("未付清，请使用洗后付结账");
+                }
                 this.status = OrderStatus.PICKED_UP;
                 this.finishTime = LocalDateTime.now();
                 break;
@@ -82,6 +85,9 @@ public class Order {
                 this.status = OrderStatus.DELIVERED;
                 break;
             case DELIVERED:          // 7 → 8
+                if (this.paidAmount.compareTo(this.totalAmount) < 0) {
+                    throw new BusinessException("未付清，请使用洗后付结账");
+                }
                 this.status = OrderStatus.PICKED_UP;
                 this.finishTime = LocalDateTime.now();
                 break;
