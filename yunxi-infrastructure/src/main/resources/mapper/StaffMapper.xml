@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.yunxi.infrastructure.persistence.mapper.StaffMapper">
+
+    <resultMap id="StaffResultMap"
+               type="com.yunxi.infrastructure.persistence.po.StaffPO">
+        <id     column="id"          property="id"/>
+        <result column="username"    property="username"/>
+        <result column="password"    property="password"/>
+        <result column="name"        property="name"/>
+        <result column="role"        property="role"/>
+        <result column="store_id"    property="storeId"/>
+        <result column="phone"       property="phone"/>
+        <result column="status"      property="status"/>
+    </resultMap>
+
+    <select id="selectByUsername" resultMap="StaffResultMap">
+        SELECT * FROM staff WHERE username = #{username}
+    </select>
+
+</mapper>

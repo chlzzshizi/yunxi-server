@@ -202,6 +202,75 @@ case DELIVERED:          // 7 → 8（网单同样需要校验）
 
 ---
 
+## Bug 5：登录密码验证失败 — BCrypt 哈希不正确
+
+### 现象
+
+登录接口返回 `401 用户名或密码错误`，但数据库里有 admin 用户，密码也是对的。
+
+### 根因
+
+V3 迁移文件里的 BCrypt 哈希值是手写的，不是用 `BCryptPasswordEncoder` 生成的。BCrypt 每个哈希自带随机盐值，手工写的哈希无法被正确验证。
+
+### 修复
+
+临时在 AuthController 构造方法里打印 `passwordEncoder.encode("admin123")`，用 Spring 自带的 BCrypt 生成正确哈希，更新数据库和 V3 迁移文件。
+
+### 教训
+
+- BCrypt 哈希不能用随机字符串冒充——必须用 `BCryptPasswordEncoder.encode()` 生成
+- V3 迁移文件要和实际生成的哈希保持一致
+
+---
+
+## Bug 6：BCryptPasswordEncoder 标红 — 依赖未传递
+
+### 现象
+
+AuthController 里 `BCryptPasswordEncoder` 标红，编译不过。
+
+### 根因
+
+`spring-security-crypto` 依赖只写在了 `yunxi-infrastructure/pom.xml`，但 AuthController 在 `yunxi-interfaces` 模块。Maven 的依赖传递没有把这个包传过去。
+
+### 修复
+
+在 `yunxi-interfaces/pom.xml` 里直接加了一条 `spring-security-crypto` 依赖。
+
+### 教训
+
+- 哪个模块用了某个 jar 包里的类，就在哪个模块的 pom.xml 里声明
+- 不要依赖 Maven 的间接传递——不总是有效
+
+---
+
+## Bug 7：Flyway 校验码不匹配 — 已执行的迁移文件不能改
+
+### 现象
+
+修改 V3 迁移文件后重启，报 `Migration checksum mismatch for migration version 3`，应用启动失败。
+
+### 根因
+
+V3 迁移文件修改前已经被 Flyway 执行过一次，`flyway_schema_history` 表存了旧的校验码。文件内容改后新旧校验码不一致，Flyway 拒绝启动——保护数据库不被意外覆盖。
+
+### 修复
+
+```sql
+DROP DATABASE yunxi;
+CREATE DATABASE yunxi;
+```
+
+删库重建，让 Flyway 重新执行所有迁移，校验码全部重新记录。
+
+### 教训
+
+- 已执行过的迁移文件**不能改**
+- 要改表结构或数据 → 新建 V4、V5 迁移文件
+- 只有空库可以随意改旧文件 + 删库重建
+
+---
+
 ## 汇总
 
 | Bug | 层 | 类型 | 一句话 |
@@ -210,6 +279,9 @@ case DELIVERED:          // 7 → 8（网单同样需要校验）
 | 2 | Infrastructure | 新建/更新逻辑未隔离 | 明细每次 `save()` 都被重复插入 |
 | 3 | Domain | 状态机缺前置校验 | 终态跳转前没检查是否付清 |
 | 4 | Interfaces | 异常未正确转换 | BusinessException 被当作 500 返回 |
+| 5 | Infrastructure | 数据错误 | BCrypt 哈希是手写的，验不过 |
+| 6 | Infrastructure | 依赖缺失 | BCrypt 包未在调用模块声明 |
+| 7 | Infrastructure | 迁移校验 | 已执行的 Flyway 文件被修改 |
 
 ---
 
@@ -226,3 +298,6 @@ case DELIVERED:          // 7 → 8（网单同样需要校验）
 | 终态不可再推进 | ✅ |
 | 洗后付未付清阻止跳终态 | ✅ |
 | items 不重复插入 | ✅ |
+| 员工登录 + 获取 Token | ✅ |
+| 不带 Token 被拦截（401） | ✅ |
+| 带 Token 正常访问 | ✅ |

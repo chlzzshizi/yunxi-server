@@ -5,7 +5,7 @@
 
 INSERT INTO staff (username, password, name, role, phone, status)
 VALUES ('admin',
-        '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy',
+        '$2a$10$fEzKJTH469Zd9GB0CKMLseS/iFVndCGene.WQiQ53Q/isi2yZa5oS',
         '系统管理员',
         0,
         '13800000000',
