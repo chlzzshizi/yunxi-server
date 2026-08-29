@@ -271,6 +271,172 @@ CREATE DATABASE yunxi;
 
 ---
 
+## Bug 8：Application 层引用不到 Infrastructure 的 Mapper
+
+### 现象
+
+`CouponAppService`（在 yunxi-application）里 import `CouponMapper` 和 `CouponGrabMapper`（在 yunxi-infrastructure），编译提示 `程序包com.yunxi.infrastructure.persistence.mapper不存在`。
+
+### 根因
+
+`yunxi-application/pom.xml` 只依赖了 `yunxi-common` 和 `yunxi-domain`，没有依赖 `yunxi-infrastructure`。Mapper 都在 infrastructure 模块，所以找不到。
+
+### 修复
+
+在 `yunxi-application/pom.xml` 中添加 `yunxi-infrastructure` 依赖。
+
+### 教训
+
+- 哪个模块用了别的模块的类，就要在 pom.xml 里声明依赖
+- OrderAppService 没遇到这个问题，因为 OrderRepository 在 domain 层（application 依赖了 domain）
+- Coupon 没建 domain 层直接调了 infrastructure 的 Mapper，暴露了依赖缺失
+
+---
+
+## Bug 9：Mapper XML 文件名带前导空格
+
+### 现象
+
+`yunxi-infrastructure/src/main/resources/mapper/` 目录下出现两个**带前导空格**的文件名：
+
+```bash
+"mapper/ CouponMapper.xml"       # 注意 / 后面有一个空格
+"mapper/ CouponGrabMapper.xml"
+```
+
+当前 `mybatis.mapper-locations: classpath:mapper/**/*.xml` 的通配符恰好能匹配到它们，Windows 上能正常加载——**但这是侥幸**。
+
+### 根因
+
+创建文件时误输入了前导空格。MyBatis 的 `**/*.xml` 通配符不区分文件名细节，把带空格的文件也扫进去了。
+
+### 隐患
+
+- Linux 文件系统对文件名严格区分，同名的 `CouponMapper.xml` 和 ` CouponMapper.xml` 是两个不同文件
+- 任何按文件名精确引用/查找的场景（部署脚本、CI、团队协作、IDE 搜索）都会找不到文件
+- "恰好能跑"不等于"正确"——问题只是被通配符掩盖了
+
+### 修复
+
+用 `git mv` 重命名，去掉前导空格：
+
+```bash
+git mv "mapper/ CouponMapper.xml" "mapper/CouponMapper.xml"
+git mv "mapper/ CouponGrabMapper.xml" "mapper/CouponGrabMapper.xml"
+```
+
+### 教训
+
+- 文件名不允许有前导空格——检查文件时留意 `ls` 输出里路径中的异常空格
+- 依赖通配符加载的文件，命名错误会被掩盖，要主动核对实际文件名
+- Windows 能跑 ≠ Linux 能跑，跨平台部署前检查这类隐性差异
+
+---
+
+## Bug 10：抢完库存"加回"存在竞态，库存键恢复不到 0
+
+### 现象
+
+`grabCoupon` 在 DECR 返回负数时执行 `increment` 加回。库存只剩最后 1 份时两个顾客并发抢：
+
+```
+顾客A: DECR → -1 → 加回 → 0
+顾客B: DECR → -2 → 加回 → -1   ← 库存键最终是 -1，恢复不到 0
+```
+
+库存键的值从此脏掉，后续补货、活动重开时剩余量计算错误。
+
+### 根因
+
+- `decrement` 和 `increment` 是 Redis 上两条独立命令，中间可以插入其他请求，**"先减后加"不是原子操作**
+- "抢完加回"的思路本身是错的：加回的数量无法精确匹配（A、B 都以为自己只多减了 1）
+
+### 修复
+
+去掉加回逻辑。`remaining < 0` 直接返回"已抢完"，库存键保留负数（语义：超出 N 人想抢），下次发券时 `SET` 覆盖即可：
+
+```java
+if (remaining == null || remaining < 0) {
+    // 已抢完。不加回：并发下"减了再加"不是原子操作，加不回来；
+    // 库存键保留负数表示"超出多少人想抢"，下次发券 SET 覆盖即可
+    return Result.fail(400, "已抢完");
+}
+```
+
+### 教训
+
+- 需要"多步原子"时单条命令不够：要么 Lua 脚本合成一步，要么重新设计数据语义
+- 不要用"出错后补偿"来弥补并发错误——补偿操作本身也有竞态
+
+---
+
+## Bug 11：并发重复抢返回 500，且 Redis 留下脏标记
+
+### 现象
+
+同一顾客快速点两次"抢券"：
+
+1. 两个请求都通过了 `isMember` 检查（Redis 里还没有标记）
+2. 两个请求都 DECR 成功，库存扣了 2
+3. 第一次 `insert` 成功，第二次撞 `uk_coupon_customer` 唯一键 → 抛异常 → 全局异常兜底返回 **500**
+4. 更糟：原代码先 `SADD` 后 `insert`，撞键时用户**已被标记在 Redis 集合里，但数据库没有记录**——该用户永远无法再抢
+
+### 根因
+
+- `isMember → DECR → SADD → insert` 四步非原子，Redis Set 判重只是"快速路径"，不是权威数据源
+- 写操作顺序错误：先写缓存（SADD）后写数据库（insert），数据库失败时缓存留下脏标记
+
+### 修复
+
+调整顺序：**先写数据库（权威数据源，唯一键兜底），成功后再标记 Redis**，撞键时优雅返回并还回库存：
+
+```java
+try {
+    couponGrabMapper.insert(grab);          // uk_coupon_customer 兜底
+} catch (DuplicateKeyException e) {
+    redisTemplate.opsForValue().increment(stockKey);   // 还回多扣的库存
+    return Result.fail(400, "你已经抢过了");
+}
+redisTemplate.opsForSet().add(grabbedKey, customerId.toString());
+```
+
+### 教训
+
+- 强一致需求（判重）的权威数据源是数据库唯一键，Redis 只能做快速路径
+- 缓存和数据库的写顺序原则：**先权威，后缓存**——缓存可以重建，数据库不能脏
+
+---
+
+## Bug 12：命令行无法编译 — 环境未配置 + Maven Wrapper 未落地
+
+> 类型说明：这是工程/环境问题，不是程序运行时缺陷。程序本身没出错，是"工具链不可复现 + 设计计划未落地"。记录价值在教训。
+
+### 现象
+
+- 命令行执行 `mvn compile` 报 `mvn: command not found`
+- 系统 PATH 上的 java 是 1.8.0_131（项目要求 JDK 21）
+- 设计文档第九节明确写了"Maven Wrapper（锁定版本）"，但项目里一直没有 `mvnw`
+- 结果：只有 IDEA 内置环境能编译，脱离 IDE 命令行一碰就挂
+
+### 根因
+
+- 环境变量未配置：Maven 只存在于 IDEA 内置路径（`plugins/maven/lib/maven3`），不在系统 PATH；`JAVA_HOME` 未指向 jdk21
+- 设计文档写了 Wrapper 计划，实现阶段没有回头核对落地
+
+### 修复
+
+1. 用 IDEA 内置 Maven 生成 Wrapper：`mvn wrapper:wrapper -Dmaven=3.9.9`
+2. 项目新增 `mvnw`、`mvnw.cmd`、`.mvn/wrapper/maven-wrapper.properties`，锁定 Maven 3.9.9
+3. 验证：`./mvnw -version` 自动下载 3.9.9 到 `~/.m2/wrapper/dists`，编译正常
+
+### 教训
+
+- 设计文档写了的配置项，做完功能要回头核对是否落地——计划不执行等于没计划
+- 工具链要能脱离 IDE 复现：否则换机器、上 CI、命令行打包全部直接挂
+- "现在能跑"不等于"环境正确"——这次是环境侥幸，和 Bug 9（文件名侥幸）是同一类问题
+
+---
+
 ## 汇总
 
 | Bug | 层 | 类型 | 一句话 |
@@ -282,6 +448,11 @@ CREATE DATABASE yunxi;
 | 5 | Infrastructure | 数据错误 | BCrypt 哈希是手写的，验不过 |
 | 6 | Infrastructure | 依赖缺失 | BCrypt 包未在调用模块声明 |
 | 7 | Infrastructure | 迁移校验 | 已执行的 Flyway 文件被修改 |
+| 8 | Application | 依赖缺失 | Application 未依赖 Infrastructure |
+| 9 | Infrastructure | 文件名错误 | Mapper XML 文件名带前导空格 |
+| 10 | Application | 并发竞态 | 抢完库存"加回"不是原子操作，库存键恢复不到 0 |
+| 11 | Application | 并发竞态 | 重复抢撞唯一键返回 500，且 Redis 留下脏标记 |
+| 12 | 环境 | 工具链不可复现 | Maven 不在 PATH、java 1.8、Wrapper 未落地 |
 
 ---
 
