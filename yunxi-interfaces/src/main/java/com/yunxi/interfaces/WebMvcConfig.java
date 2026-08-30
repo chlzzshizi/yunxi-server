@@ -28,6 +28,7 @@ public class WebMvcConfig implements WebMvcConfigurer {
                 .addPathPatterns("/api/**")              // 拦截所有 API
                 .excludePathPatterns(
                         "/api/auth/**",                  // 登录/登出不需要 Token
+                        "/api/coupons/*/grab",           // TODO: 顾客 JWT 落地后移除，临时放行抢券
                         "/swagger-ui/**",                // Knife4j 文档不需要
                         "/v3/api-docs/**",               // API 文档不需要
                         "/doc.html"                      // Knife4j 页面不需要

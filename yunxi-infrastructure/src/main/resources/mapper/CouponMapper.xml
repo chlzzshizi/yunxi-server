@@ -30,4 +30,7 @@
         UPDATE coupons SET status = #{status} WHERE id = #{id}
     </update>
 
+    <select id="selectList" resultMap="CouponResultMap">
+        SELECT * FROM coupons ORDER BY start_time DESC
+    </select>
 </mapper>

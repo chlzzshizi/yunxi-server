@@ -437,6 +437,64 @@ redisTemplate.opsForSet().add(grabbedKey, customerId.toString());
 
 ---
 
+## Bug 13：Knife4j 空白无接口分组 — springdoc 2.6.0 与 Spring Boot 3.5 版本不兼容
+
+> 类型说明：这是依赖版本冲突（运行期错误），不是业务逻辑缺陷。编译期完全正常，运行时才炸——此类问题排查最隐蔽。
+
+### 现象
+
+- 打开 `http://localhost:8081/doc.html`，左侧"文档管理 → default 分组"下**没有任何接口**，之前能看到的"认证接口 / 订单接口 / 折扣券接口"分组全部消失
+- 直接请求 `GET /v3/api-docs`，返回的是全局异常处理器的兜底格式：
+
+```json
+{"code":500,"message":"服务器内部错误","data":null}
+```
+
+- 诡异点：`/v3/api-docs/swagger-config` 返回 200，`doc.html` 也能打开（页面框架正常），唯独接口列表是空的
+- 业务接口（登录、发券、抢券）全部正常——只有文档生成受影响
+
+### 复现步骤
+
+1. 启动应用（Spring Boot 3.5.0 + springdoc 2.6.0）
+2. 浏览器访问 `doc.html` → 分组空白
+3. `curl http://localhost:8081/v3/api-docs` → 返回 `{"code":500,...}`（注意：HTTP 状态码是 200，内容才是 500）
+
+### 根因
+
+查看应用日志，全局异常处理器记录的真实堆栈第一行：
+
+```text
+java.lang.NoSuchMethodError: 'void org.springframework.web.method.ControllerAdviceBean.<init>(java.lang.Object)'
+```
+
+- `ControllerAdviceBean` 是 **Spring Framework** 的类，运行环境加载的是 Spring Framework 6.2.7（Spring Boot 3.5 自带）
+- **springdoc 2.6.0** 是按 Spring Framework 6.1 编译的，它调用 `ControllerAdviceBean(Object)` 这个**单参构造函数**——该构造函数在 Spring 6.2 中被**删除**了
+- springdoc 生成文档时要扫描 `@RestControllerAdvice` 处理器（GlobalExceptionHandler），一调用这个构造函数就抛 `NoSuchMethodError`，文档生成中断
+- `NoSuchMethodError` 是**运行期错误**：编译时类和方法都"存在过"，编译器检查不出来，所以 `mvn compile` 一路绿灯，只有运行时才炸
+
+### 修复
+
+升级 springdoc 到兼容 Spring Boot 3.5 的版本线（2.8.x），修改 `pom.xml`：
+
+```xml
+<!-- 修改前 -->
+<springdoc.version>2.6.0</springdoc.version>
+
+<!-- 修改后：2.8.x 是 Boot 3.4/3.5 的最低兼容版本；2.8.13 + Knife4j 4.4.0 + Boot 3.5.6 有社区实测成功案例 -->
+<springdoc.version>2.8.13</springdoc.version>
+```
+
+验证：全新实例上 `/v3/api-docs` 返回全部 9 个接口（订单 5 + 券 2 + 认证 2），登录接口正常。
+
+### 教训
+
+- **`NoSuchMethodError` / `NoClassDefFoundError` = 版本冲突的典型信号**：某个库按旧版本的类签名编译，运行时加载到的新版本把该方法/类删了。编译期永远检查不到，只能看运行时堆栈
+- **升级依赖，不要降级框架**：框架（Boot）升级后要同步升级配套库，而不是把框架降回去迁就旧库；改 pom 前先查该库与当前 Boot 版本的兼容矩阵
+- **排查时永远看响应体内容，状态码会撒谎**：`Result` 统一包装让业务失败也返回 HTTP 200，只看状态码会把 500 误判为"正常"
+- 文档类问题先验证 `/v3/api-docs` 的**内容**（tags/paths 是否为空），而不是只看它是否 200
+
+---
+
 ## 汇总
 
 | Bug | 层 | 类型 | 一句话 |
@@ -453,6 +511,7 @@ redisTemplate.opsForSet().add(grabbedKey, customerId.toString());
 | 10 | Application | 并发竞态 | 抢完库存"加回"不是原子操作，库存键恢复不到 0 |
 | 11 | Application | 并发竞态 | 重复抢撞唯一键返回 500，且 Redis 留下脏标记 |
 | 12 | 环境 | 工具链不可复现 | Maven 不在 PATH、java 1.8、Wrapper 未落地 |
+| 13 | 依赖 | 版本冲突 | springdoc 2.6.0 与 Boot 3.5 不兼容，Knife4j 空白无接口 |
 
 ---
 

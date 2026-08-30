@@ -2,6 +2,9 @@ package com.yunxi.infrastructure.persistence.po;
 
 import java.time.LocalDateTime;
 
+/**
+ * 抢券记录表 coupon_grabs 的数据库映射对象。
+ */
 public class CouponGrabPO {
 
     private Long id;

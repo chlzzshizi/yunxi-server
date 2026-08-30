@@ -11,6 +11,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 折扣券应用服务 —— 发券 + 抢券。
@@ -28,6 +29,13 @@ public class CouponAppService {
         this.couponMapper = couponMapper;
         this.couponGrabMapper = couponGrabMapper;
         this.redisTemplate = redisTemplate;
+    }
+
+    /**
+     * 可用券列表
+     */
+    public Result<List<CouponPO>> listCoupons() {
+        return Result.ok(couponMapper.selectList());
     }
 
     /**
