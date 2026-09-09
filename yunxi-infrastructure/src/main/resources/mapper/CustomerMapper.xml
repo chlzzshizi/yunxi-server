@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.yunxi.infrastructure.persistence.mapper.CustomerMapper">
+
+    <resultMap id="CustomerResultMap"
+               type="com.yunxi.infrastructure.persistence.po.CustomerPO">
+        <id     column="id"        property="id"/>
+        <result column="store_id"  property="storeId"/>
+        <result column="name"      property="name"/>
+        <result column="phone"     property="phone"/>
+        <result column="password"  property="password"/>
+        <result column="birthday"  property="birthday"/>
+        <result column="gender"    property="gender"/>
+        <result column="balance"   property="balance"/>
+    </resultMap>
+
+    <select id="selectByPhone" resultMap="CustomerResultMap">
+        SELECT id, store_id, name, phone, password, birthday, gender, balance
+        FROM customers
+        WHERE phone = #{phone}
+    </select>
+
+    <insert id="insert" parameterType="com.yunxi.infrastructure.persistence.po.CustomerPO"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO customers (store_id, name, phone, password)
+        VALUES (#{storeId}, #{name}, #{phone}, #{password})
+    </insert>
+</mapper>

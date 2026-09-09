@@ -43,6 +43,27 @@ public class JwtUtil {
                 .subject(username)                   // 主题 = 用户名
                 .claim("staffId", staffId)           // 自定义字段：员工 ID
                 .claim("role", role)                  // 自定义字段：角色
+                .claim("type", "staff")              // 身份类型：员工
+                .issuedAt(now)                        // 签发时间
+                .expiration(expireDate)               // 过期时间
+                .signWith(key)                        // 签名
+                .compact();                           // 打包成字符串
+    }
+
+    /**
+     * 生成顾客 Token
+     * @param customerId 顾客 ID
+     * @param phone      手机号
+     * @return JWT 字符串
+     */
+    public String generateCustomerToken(Long customerId, String phone) {
+        Date now = new Date();
+        Date expireDate = new Date(now.getTime() + expiration);
+
+        return Jwts.builder()
+                .subject(phone)                       // 主题 = 手机号
+                .claim("customerId", customerId)      // 自定义字段：顾客 ID
+                .claim("type", "customer")            // 身份类型：顾客
                 .issuedAt(now)                        // 签发时间
                 .expiration(expireDate)               // 过期时间
                 .signWith(key)                        // 签名
@@ -88,5 +109,15 @@ public class JwtUtil {
     /** 从 Token 取角色 */
     public Integer getRole(String token) {
         return parseToken(token).get("role", Integer.class);
+    }
+
+    /** 从 Token 取身份类型（staff=员工 customer=顾客） */
+    public String getType(String token) {
+        return parseToken(token).get("type", String.class);
+    }
+
+    /** 从 Token 取顾客 ID */
+    public Long getCustomerId(String token) {
+        return parseToken(token).get("customerId", Long.class);
     }
 }

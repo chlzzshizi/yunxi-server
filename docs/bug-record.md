@@ -586,3 +586,17 @@ public Result<Void> handleNoResource(NoResourceFoundException e) {
 | 员工登录 + 获取 Token | ✅ |
 | 不带 Token 被拦截（401） | ✅ |
 | 带 Token 正常访问 | ✅ |
+
+### 2026-09-09 券收尾 + 顾客 JWT
+
+| 功能 | 状态 |
+|---|---|
+| 券状态定时推进（1→2→3，次分钟幂等 0+0） | ✅ |
+| Redis 库存键丢失懒加载兜底（删键后首抢自动重建，Redis 与 DB 行数一致） | ✅ |
+| 顾客注册（注册即登录，uk_phone 兜底并发重复注册） | ✅ |
+| 顾客登录（BCrypt 校验；password=NULL 的门店单顾客显式拦截） | ✅ |
+| 顾客 token 抢券（真实顾客落库，customerId 从 token 取） | ✅ |
+| 员工 token 抢券被拒（401 身份隔离，防横向越权） | ✅ |
+| 无 token 请求被拦截（401） | ✅ |
+| 重复注册同手机号被拒（400） | ✅ |
+| 中文数据 UTF-8 存储验证（HEX E5BCA0E4B889 = 张三） | ✅ |

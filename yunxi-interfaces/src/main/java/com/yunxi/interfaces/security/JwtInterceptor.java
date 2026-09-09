@@ -43,10 +43,20 @@ public class JwtInterceptor implements HandlerInterceptor {
             throw new BusinessException(401, "Token 无效或已过期");
         }
 
-        // 4. 把用户信息放进请求属性，Controller 后面能取到
-        request.setAttribute("staffId", jwtUtil.getStaffId(token));
-        request.setAttribute("username", jwtUtil.getUsername(token));
-        request.setAttribute("role", jwtUtil.getRole(token));
+        // 4. 按身份类型把信息放进请求属性，Controller 后面能取到
+        //    type 识别员工/顾客（防横向越权：员工 token 不能抢券、顾客 token 不能管店）
+        String type = jwtUtil.getType(token);
+        if (!"staff".equals(type) && !"customer".equals(type)) {
+            throw new BusinessException(401, "Token 无效或已过期");
+        }
+        request.setAttribute("type", type);
+        if ("customer".equals(type)) {
+            request.setAttribute("customerId", jwtUtil.getCustomerId(token));
+        } else {
+            request.setAttribute("staffId", jwtUtil.getStaffId(token));
+            request.setAttribute("username", jwtUtil.getUsername(token));
+            request.setAttribute("role", jwtUtil.getRole(token));
+        }
 
         return true;  // 放行
     }
