@@ -33,4 +33,13 @@
     <select id="selectList" resultMap="CouponResultMap">
         SELECT * FROM coupons ORDER BY start_time DESC
     </select>
+    <update id="startReadyCoupons">
+        UPDATE coupons SET status = 2
+        WHERE status = 1 AND start_time &lt;= NOW()
+    </update>
+
+    <update id="endExpiredCoupons">
+        UPDATE coupons SET status = 3
+        WHERE status = 2 AND end_time &lt; NOW()
+    </update>
 </mapper>

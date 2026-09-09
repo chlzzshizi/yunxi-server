@@ -10,4 +10,7 @@
         VALUES (#{couponId}, #{customerId})
     </insert>
 
+    <select id="countByCouponId" resultType="long">
+        SELECT COUNT(*) FROM coupon_grabs WHERE coupon_id = #{couponId}
+    </select>
 </mapper>

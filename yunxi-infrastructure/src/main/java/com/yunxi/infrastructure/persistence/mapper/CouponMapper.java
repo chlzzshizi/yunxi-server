@@ -18,4 +18,10 @@ public interface CouponMapper {
 
     /** 查询券列表（按开抢时间倒序） */
     List<CouponPO> selectList();
+
+    /** 开抢：status=1 且已到 start_time 的券 → 置为 2（进行中），返回影响行数 */
+    int startReadyCoupons();
+
+    /** 结束：status=2 且已过 end_time 的券 → 置为 3（已结束），返回影响行数 */
+    int endExpiredCoupons();
 }

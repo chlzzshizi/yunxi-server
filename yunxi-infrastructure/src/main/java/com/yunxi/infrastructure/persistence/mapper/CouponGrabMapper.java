@@ -8,4 +8,7 @@ public interface CouponGrabMapper {
 
     /** 插入抢券记录 */
     void insert(CouponGrabPO grabPO);
+
+    /** 统计某张券已被抢的数量（数据库真相，用于重建 Redis 库存） */
+    long countByCouponId(Long couponId);
 }

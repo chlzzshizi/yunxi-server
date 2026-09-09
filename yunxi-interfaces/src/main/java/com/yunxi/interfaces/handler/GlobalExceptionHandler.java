@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
  * 全局异常处理器 —— 把所有异常转成统一的 Result.fail() 格式。
@@ -27,6 +28,13 @@ public class GlobalExceptionHandler {
     public Result<Void> handleIllegalArgument(IllegalArgumentException e) {
         log.warn("参数错误: {}", e.getMessage());
         return Result.fail(400, e.getMessage());
+    }
+
+    /** 静态资源不存在（浏览器自动请求 favicon.ico 等）→ 返回 404，不视为服务器错误 */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public Result<Void> handleNoResource(NoResourceFoundException e) {
+        log.warn("资源不存在: {}", e.getResourcePath());
+        return Result.fail(404, "资源不存在");
     }
 
     /** 兜底：其他所有未知异常 → 500 */

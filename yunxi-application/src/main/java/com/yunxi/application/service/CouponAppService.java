@@ -37,7 +37,13 @@ public class CouponAppService {
     public Result<List<CouponPO>> listCoupons() {
         return Result.ok(couponMapper.selectList());
     }
-
+    /**
+     * 推进券状态（定时任务每分钟调用）：
+     * 1→2（开抢时间到），2→3（截止时间过）。返回本次推进的总行数
+     */
+    public int refreshCouponStatus() {
+        return couponMapper.startReadyCoupons() + couponMapper.endExpiredCoupons();
+    }
     /**
      * 店长发券
      */
@@ -67,7 +73,15 @@ public class CouponAppService {
         }
         // 3. 原子扣库存（DECR 单条命令，天然无锁，不会超卖）
         String stockKey = "coupon:stock:" + couponId;
+        // 3.1 兜底：库存键不存在（Redis 数据丢失/删库等）→ 按数据库真相重建
+        //     setIfAbsent 单条命令原子：并发同时重建时只有第一个生效，不会覆盖已扣减的值
+        if (Boolean.FALSE.equals(redisTemplate.hasKey(stockKey))) {
+            long grabbed = couponGrabMapper.countByCouponId(couponId);
+            long remainingStock = Math.max(coupon.getTotalStock() - grabbed, 0L);
+            redisTemplate.opsForValue().setIfAbsent(stockKey, String.valueOf(remainingStock));
+        }
         Long remaining = redisTemplate.opsForValue().decrement(stockKey);
+
         if (remaining == null || remaining < 0) {
             // 已抢完。不加回：并发下"减了再加"不是原子操作，加不回来；
             // 库存键保留负数表示"超出多少人想抢"，下次发券 SET 覆盖即可
