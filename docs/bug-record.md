@@ -495,6 +495,60 @@ java.lang.NoSuchMethodError: 'void org.springframework.web.method.ControllerAdvi
 
 ---
 
+## Bug 14：favicon.ico 请求刷 ERROR —— 兜底异常处理把"资源不存在"当成 500
+
+> 类型说明：这是全局异常处理的**覆盖范围设计缺陷**（日志噪音型），不是业务功能缺陷。业务接口全部正常，问题在于"兜底网撒得太大，把正常情况也捞进来当服务器错误"。
+
+### 现象
+
+- 打开 `http://localhost:8081/doc.html`（Knife4j）后，应用控制台连刷：
+
+```text
+ERROR 22688 --- [nio-8081-exec-2] c.y.i.handler.GlobalExceptionHandler : 服务器内部错误
+org.springframework.web.servlet.resource.NoResourceFoundException: No static resource favicon.ico.
+```
+
+- 每次浏览器打开/刷新页面，就多一条 ERROR + 二十多行完整堆栈，真出问题时日志被淹没
+
+### 复现步骤
+
+1. 浏览器访问 `doc.html`（或任何页面）
+2. 看应用控制台 → 每条请求刷一条 ERROR 堆栈
+3. 堆栈特征：`NoResourceFoundException`，从 `ResourceHttpRequestHandler` 抛出
+
+### 根因
+
+两层原因叠加：
+
+- **浏览器自动请求 favicon.ico**：浏览器打开任何页面都会自动向服务器要站点图标，这是正常行为，项目里没这个文件而已
+- **静态资源处理器抛异常**：`/favicon.ico` 不在 `/api/**` 下（JWT 拦截器只管 API），请求落到 Spring 的 `ResourceHttpRequestHandler`，找不到文件就抛 `NoResourceFoundException` —— 语义是"资源不存在"（404 场景），**不是服务器错误**
+- **兜底网撒得太大**：`GlobalExceptionHandler` 只有 `@ExceptionHandler(Exception.class)` 一个兜底，把 `NoResourceFoundException` 也接住了 → `log.error("服务器内部错误", e)` + 返回 code 500
+
+关键认知：**"文件不存在"是客户端侧的 404 情况，被"一切异常皆 500"的兜底误判成了服务器故障**。
+
+### 修复
+
+在兜底 catch-all 之前加一个**更具体的 handler**。Spring 的匹配规则是"多个 handler 都能匹配时，最具体的生效"，所以它自动抢在 `Exception` 兜底前面，兜底一行不用改：
+
+```java
+/** 静态资源不存在（浏览器自动请求 favicon.ico 等）→ 返回 404，不视为服务器错误 */
+@ExceptionHandler(NoResourceFoundException.class)
+public Result<Void> handleNoResource(NoResourceFoundException e) {
+    log.warn("资源不存在: {}", e.getResourcePath());
+    return Result.fail(404, "资源不存在");
+}
+```
+
+效果：刷新页面不再刷 ERROR，最多一条 WARN。
+
+### 教训
+
+- catch-all（`Exception → 500`）必须搭配精确异常的专用处理，否则**正常情况也会被当服务器错误打 ERROR**——真故障会被噪音淹没
+- 异常要分级：资源不存在是 WARN（404 语义），未预期异常才是 ERROR（500 语义），日志级别本身就是诊断信息
+- 兜底不需要"缩小"——加特定 handler 让 Spring 按最具体优先匹配即可，兜底仍兜住其余所有异常
+
+---
+
 ## 汇总
 
 | Bug | 层 | 类型 | 一句话 |
@@ -512,6 +566,7 @@ java.lang.NoSuchMethodError: 'void org.springframework.web.method.ControllerAdvi
 | 11 | Application | 并发竞态 | 重复抢撞唯一键返回 500，且 Redis 留下脏标记 |
 | 12 | 环境 | 工具链不可复现 | Maven 不在 PATH、java 1.8、Wrapper 未落地 |
 | 13 | 依赖 | 版本冲突 | springdoc 2.6.0 与 Boot 3.5 不兼容，Knife4j 空白无接口 |
+| 14 | Interfaces | 异常处理缺陷 | 兜底 catch-all 把 favicon.ico"资源不存在"当 500 打 ERROR 刷屏 |
 
 ---
 
