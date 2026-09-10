@@ -549,6 +549,353 @@ public Result<Void> handleNoResource(NoResourceFoundException e) {
 
 ---
 
+## Bug 15：网单洗后付订单卡死在"已送达"——两条规则组合出无出路状态
+
+> 类型说明：这是**状态机路径缺口**（死态型），由订单模块静态审计（docs/order-audit-2026-09-10.md）发现，不是运行时报错——恰恰因为不报错、不违反任何单条规则，才隐蔽：每一步操作都被"正确"拒绝了，订单只是永远到不了终点。
+
+### 现象
+
+网单洗后付（pay 0 元）订单：
+
+1. 员工按流程推进：2→3→4→6（派送中）→7（已送达）
+2. 此时点"推进"——被拦："未付清，请使用洗后付结账"（正确）
+3. 点"洗后付结账"——也被拦："当前状态不允许洗后付结账: 状态=7"（看似也对）
+4. **两条路都断，订单永久停在 7**
+
+### 根因
+
+两条各自合理的规则，组合后形成死区：
+
+| 规则 | 来源 | 单独看 |
+|---|---|---|
+| 走终态 8 前必须付清 | Bug 3 的修复（`updateStatus` 7→8 校验 `paidAmount >= totalAmount`） | ✅ 正确 |
+| finalPay 只允许状态 5/6 | 设计文档 §5.4 原文 | ✅ 看似合理 |
+
+问题出在**顺序假设**：文档流程图把"finalPay(6→8)"和"updateStatus(6→7)→updateStatus(7→8)"画成两条并列路径，隐含"洗后付要在 6 态结账"。但状态机是**操作序列**，没有任何机制阻止员工先 6→7 —— 一旦先推进，7 态就落在两条规则的夹缝里。
+
+### 修复
+
+`finalPay` 允许状态 7（配送是物流事实，不应被付款状态阻断；门店单 5、网单 6/7 结账都合理）：
+
+```java
+if (this.status != OrderStatus.PENDING_PICKUP     // 5 门店待取件
+        && this.status != OrderStatus.DELIVERING  // 6 网单派送中
+        && this.status != OrderStatus.DELIVERED) { // 7 网单已送达（本次修复）
+    throw new BusinessException("当前状态不允许洗后付结账: 状态=" + this.status.getCode());
+}
+```
+
+同步更新：设计文档 §5.2/§5.3/§5.4（含修复记录）；回归测试 `OrderTest.DeadlockRegression` 锁定。
+
+### 教训
+
+- **状态机验收要查"状态 × 操作"全矩阵**，不能只走合法路径：每个状态点上每个操作，要么合法推进、要么明确拒绝——不存在"全被拒绝"的死态
+- **规则组合比单条规则危险**：两条"看起来正确"的校验合在一起可能互相锁死。审查时要把校验放进同一张表里交叉看
+- **文档里的流程图会覆盖分支顺序**：画成"两条并列路径"的操作，实际执行是有先后组合的，流程分支要用矩阵穷举验证
+- 单测覆盖要包含"**合法操作的非法顺序**"（先 6→7 再结账），不只是"非法操作"（跳级、终态推进）
+
+---
+
+## Bug 16：任何人拿任何 token 都能操作任何订单——接口只认订单 id，不认操作人
+
+> 类型说明：这是**横向越权**（IDOR，Insecure Direct Object Reference）：接口用"资源 id"当唯一输入，却没校验"请求者是否有权碰这个资源"。由订单模块静态审计（docs/order-audit-2026-09-10.md）发现。
+
+### 现象
+
+改前的订单接口签名是：
+
+```java
+public Result<Void> nextStatus(@PathVariable Long id)          // 只认 id
+public Result<Order> getOrder(@PathVariable Long id)            // 只认 id
+public Result<Void> pay(Long id, PayMethod m, BigDecimal amt)   // 只认 id
+```
+
+后果（都是真机可复现的）：
+
+| 谁能做什么 | 应该 | 改前实际 |
+|---|---|---|
+| 顾客 token 推进订单状态 | 拒绝 | **成功推进别人的订单** |
+| 顾客 token 替订单付款 | 拒绝 | **成功** |
+| 顾客查看别人的订单详情 | 拒绝 | **成功** |
+| A 门店员工操作 B 门店订单 | 拒绝 | **成功** |
+
+### 根因
+
+身份信息在 `JwtInterceptor` 里已经解析好并放进了 request attribute，但订单控制器**一个都没取**——token 被用来"过闸机"（鉴权），但过了闸机之后没人再看你是谁（授权）。**认证 ≠ 授权**：验证了"你是合法用户"不等于"这件事你有权做"。
+
+### 修复
+
+1. 控制器从 token（而非请求体）提取身份并传入应用层：
+
+```java
+private Long requireStaff(HttpServletRequest http) {
+    if (!"staff".equals(http.getAttribute("type"))) {
+        throw new BusinessException(401, "请使用员工账号操作");
+    }
+    return (Long) http.getAttribute("staffId");
+}
+```
+
+2. 归属校验放应用层（可单元测试）：
+
+```java
+if ("customer".equals(requesterType)) {
+    if (!order.getCustomerId().equals(requesterId)) throw new BusinessException(403, "无权查看该订单");
+} else {
+    if (!requesterStoreId.equals(order.getStoreId())) throw new BusinessException(403, "无权查看其他门店的订单");
+}
+```
+
+3. 列表查询同理：员工按 token 里的 storeId 筛、顾客按 customerId 筛，**前端传不了也改不了**。
+
+### 验收（真机）
+
+| 用例 | 结果 |
+|---|---|
+| 顾客 token 调 next / pay / final-pay | ✅ 401 请使用员工账号操作 |
+| 顾客 A 查顾客 B 的订单 | ✅ 403 |
+| 二店店长查一店的订单 | ✅ 403 |
+| 二店店长列表 | ✅ total=0（看不到一店数据） |
+
+### 教训
+
+- **每个接口都要问两遍**：你是谁（认证）＋ 你能不能碰这个 id（授权）。只做前者等于没锁门
+- **身份只能来自 token**，绝不能来自请求体——请求体是攻击者完全控制的数据
+- 授权规则写在**应用层**（`OrderAppService`），控制器只做身份提取：这样规则能用单测锁住（`OrderAppServiceTest.GetOrder` 6 个用例）
+- **越权漏洞不会报错**：它表现为"功能正常"，只有专门去试才会发现。别等 `@Valid` 之类的东西救你
+
+---
+
+## Bug 17：`OrderStatus.fromCode` 抛 `IllegalAccessError`——全局异常处理器接不住
+
+> 类型说明：**异常类型选错**。飘在异常体系之外的 `Error`，从所有 `catch (Exception)` 的网里漏出去。
+
+### 现象
+
+`OrderStatus.fromCode(99)` 不返回 400，而是让请求变成一个非 JSON 的 500 页面（Tomcat 的错误页）。
+
+### 根因
+
+```java
+// 改前
+throw new IllegalAccessError("没有这个状态:" + code);   // ← Error 的子类
+```
+
+两个问题叠在一起：
+
+1. **`IllegalAccessError` 是 `Error` 不是 `Exception`** —— 全局处理器写的是 `@ExceptionHandler(Exception.class)`，接不住 `Error`，异常直接漏到 Servlet 容器
+2. **语义完全不对** —— `IllegalAccessError` 是 JVM 的类访问权限错误（比如一个类试图访问它没权限的成员），和"状态码不存在"毫无关系
+
+同一个项目里 `OrderSource.fromCode` / `PayMethod.fromCode` 用的都是 `IllegalArgumentException`，只有这一个写错了——**三个同类方法，一个手滑**。
+
+### 修复
+
+```java
+throw new IllegalArgumentException("没有这个状态:" + code);   // 与另两个枚举一致
+```
+
+### 教训
+
+- **`Error` 不要用来表达业务错误**：`Error` 是 JVM 级别的（OOM、栈溢出、类加载失败），业务代码抛 `Exception` 的子类
+- **同类方法要长得一样**：三个 `fromCode`，两个用 `IllegalArgumentException`、一个用 `IllegalAccessError`，这种不一致本身就是 bug 的温床。写新方法时先照抄邻居
+- 兜底 `@ExceptionHandler(Exception.class)` 有天然盲区（`Error`、`Throwable`），别以为"有兜底就万事大吉"
+- 这个 bug 的真机验收用例是 `?status=99` → 400，属于"参数校验"那批，跟越权一起验的
+
+---
+
+## Bug 18：订单号用秒级时间戳，同一秒两笔单直接撞唯一索引
+
+> 类型说明：**标识符生成策略**缺陷。撞库概率不是"理论上"的，同秒并发下单必然发生。
+
+### 现象
+
+两笔订单在同一秒创建时，`orders.uk_order_no` 唯一索引拦下第二笔，用户看到 500。
+
+### 根因
+
+```java
+// 改前
+String orderNo = "YX" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
+```
+
+`yyyyMMddHHmmss` 精度只到秒。门店高峰期收银台连续开单、或者网单被脚本批量提交，"同一秒"不但可能，而且是常态。数据库有 `uk_order_no` 唯一索引（这是对的，是最后防线），于是第二笔直接插不进去。
+
+### 修复
+
+两层防护：
+
+1. **生成策略**：加 4 位随机数，把同秒碰撞概率从"必然"降到 1/10000
+
+```java
+static String generateOrderNo() {
+    String ts = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
+    int rand = ThreadLocalRandom.current().nextInt(10000);
+    return "YX" + ts + String.format("%04d", rand);
+}
+```
+
+2. **撞了就重试**：捕获 `DuplicateKeyException`，换个号重来（最多 3 次，连撞 3 次说明生成策略有毛病，报错让人看见）
+
+```java
+try {
+    orderRepository.save(order);
+    return Result.ok(order);
+} catch (DuplicateKeyException e) {
+    log.warn("订单号冲突（第 {} 次），换号重试: {}", attempt, order.getOrderNo());
+}
+```
+
+### 验收
+
+- 真机：订单号形如 `YX202609102129391728`（YX + 18 位数字）
+- 单测：撞一次后重试成功（`verify(save, times(2))`）；连撞 3 次报"订单号生成冲突"
+
+### 教训
+
+- **唯一索引不是敌人，是安全网**：它拦住的是"你的生成策略有洞"这个事实。正确反应是修策略 + 加重试，不是去掉索引
+- **"同一秒"比你想的常见**：秒级精度的标识符在任何有并发的系统里都会撞；时间戳精度要和业务写入速率匹配
+- **重试必须有上限**：无上限重试 = 死循环；上限 + 明确报错，让问题暴露而不是被吞掉
+- 这也是为什么"业务错误"和"技术错误"要分开：撞号是技术问题（重试可解），不该让用户看到 500
+
+---
+
+## Bug 19：读-改-写丢更新——两个员工同时点"推进"，同一单被推两格
+
+> 类型说明：**并发竞态**（lost update，丢更新）。单机单线程永远复现不了，所以最容易"测试全绿"。
+
+### 现象
+
+两个员工同时点同一单的"推进"：
+
+```
+员工A: 读到 status=3 → 内存改 4 → UPDATE status=4 WHERE id=10
+员工B: 读到 status=3 → 内存改 4 → UPDATE status=4 WHERE id=10   ← 覆盖A，且两人都以为推进了一格
+```
+
+结果：订单状态和每个人以为的都不一致；连续点两次可能一次推进两格（3→5），跳过"待出厂"。
+
+### 根因
+
+应用层的状态操作是标准的**读-改-写**三步，中间有时间窗：
+
+```java
+Order order = orderRepository.findById(orderId)...;   // 读
+order.updateStatus();                                  // 改（内存）
+orderRepository.save(order);                           // 写（无条件 UPDATE ... WHERE id=?）
+```
+
+`save()` 的 UPDATE 只按 `id` 定位，**不带任何状态条件**——数据库无法知道"我读到的状态是不是已经过期"。这不是"概率低所以算了"的问题：门店多端（收银台 + 店长手机）同时操作是常态。
+
+### 修复
+
+用 **CAS（Compare-And-Swap）**：UPDATE 带上"操作前读到的状态"作为条件，让数据库原子地判断"状态是否还是我读到的那个"。
+
+```xml
+UPDATE orders SET status = #{po.status}, ...
+WHERE id = #{po.id}
+  AND status = #{expectedStatus}      <!-- 关键：状态必须仍是操作前那个 -->
+```
+
+```java
+private void saveStatusChange(Order order, OrderStatus beforeStatus, Long operatorStaffId) {
+    order.recordOperator(operatorStaffId);
+    if (!orderRepository.updateStatusCas(order, beforeStatus)) {
+        throw new BusinessException(409, "订单状态已被其他人变更，请刷新后重试");
+    }
+}
+```
+
+受影响行数 0 = 有人抢先了 → 409 让用户刷新，而不是覆盖对方。
+
+### 验收（真机，确定性复现）
+
+并发竞态通常"碰运气"才能触发，这里用**行锁把时间窗从微秒拉长到秒**，做到确定性复现：
+
+```bash
+# 另开一个 MySQL 会话，把订单行锁住 3 秒
+BEGIN; SELECT id FROM orders WHERE id=$OID FOR UPDATE; SELECT SLEEP(3); COMMIT;
+# 期间并发发两个 next 请求：两个都读到 status=3，都卡在 UPDATE 上等锁
+```
+
+| 结果 | 值 |
+|---|---|
+| 请求1 | `{"code":200}` |
+| 请求2 | `{"code":409,"message":"订单状态已被其他人变更，请刷新后重试"}` |
+| 最终 DB 状态 | 4（**只推进一格**，不是 5） |
+
+脚本：`C:\tmp\verify-race.sh`；单测：`OrderAppServiceTest.Concurrency`（2 个用例）
+
+### 教训
+
+- **"读-改-写"是并发 bug 的标准模板**：只要代码里有"查出来 → 改一改 → 存回去"，就要问一句"这中间别人改了怎么办"
+- **乐观锁 vs 悲观锁**：这里用乐观锁（不加锁，靠 WHERE 条件发现冲突），适合冲突不频繁的场景；如果这单每秒被点一千次，就该换成悲观锁（`SELECT ... FOR UPDATE`）或串行化队列
+- **状态机 + 并发 = 必须 CAS**：状态推进天然是"基于当前状态做决策"，决策依据过期了，决策就是错的
+- **单测能验逻辑，验不了竞态**：`updateStatusCas` 返回 false 是 Mock 出来的。真正的证据是上面那个行锁实验——"数据库层面确实拦住了"
+- 返回 **409 Conflict** 而不是 400：这不是用户参数错，是并发冲突，语义不同，前端处理方式也不同（提示刷新而非改输入）
+
+---
+
+## Bug 20：管理员被当成"token 过期"，报错指向一个重登也解决不了的方向
+
+> 类型说明：**两种不同的 null 被合并成一种处理**。这类 bug 不崩、不报错，只是把人往错误的方向指引。
+
+### 现象
+
+用 `admin/admin123` 登录（返回 200，token 是刚签发的），紧接着调用订单接口：
+
+```json
+{"code":401,"message":"登录信息已升级，请重新登录","data":null}
+```
+
+重新登录一百次，结果一模一样。
+
+### 根因
+
+`storeId` 为 `null` 有**两种完全不同的原因**，代码只按其中一种处理：
+
+| 原因 | 是否重登可解 | 应有的响应 |
+|---|---|---|
+| 旧 token 缺 `storeId` claim（字段是后加的） | ✅ 重登即可 | 401 登录信息已升级 |
+| 管理员 `staff.store_id` 按设计就是 NULL | ❌ 重登永远还是 NULL | 403 说清"管理员不隶属门店" |
+
+表结构注释写得很清楚：`store_id BIGINT DEFAULT NULL COMMENT '所属门店，管理员为 NULL'`——**这是设计如此**，不是数据缺失。但代码里只有一个 `if (storeId == null) → 401`，把管理员也归进了"旧 token"。
+
+而 token 里其实**有区分依据**：`role` claim（0=管理员 1=店长）早就在了，控制器却没看。
+
+### 修复
+
+按角色区分，报错要指向真正可行的方向：
+
+```java
+private Long requireStaffStore(HttpServletRequest http) {
+    Long storeId = (Long) http.getAttribute("storeId");
+    if (storeId != null) return storeId;
+    Integer role = (Integer) http.getAttribute("role");
+    if (role != null && role == 0) {
+        throw new BusinessException(403, "管理员账号不隶属门店，订单操作请使用店长账号");
+    }
+    throw new BusinessException(401, "登录信息已升级，请重新登录");   // 只留给旧 token
+}
+```
+
+一并解决"没有可用账号"的问题：V3 只种了 admin（无门店），**没有任何店长账号，订单接口谁都调不了**。新增 `V4__seed_store_manager.sql`：1 号演示门店 + `manager/admin123`（role=1，store_id=1）。
+
+### 验收（真机）
+
+| 用例 | 结果 |
+|---|---|
+| admin 查订单列表 | ✅ 403 管理员账号不隶属门店 |
+| manager 建单/支付/推进/查列表 | ✅ 全部正常（token 里有 storeId=1） |
+
+### 教训
+
+- **`null` 是有歧义的**："没这个字段"和"这个字段本来就是空"是两件事，合并处理就会给出误导性的错误
+- **错误信息要指向一个可行的动作**：说"请重新登录"之前，先确认"重新登录真的能解决吗"。不能解决的，就是把人往岔路上引
+- **种子数据和代码是一体的**：写完"管理员不能操作订单"，才发现没有人能操作订单——**验收账号要跟功能一起设计**，否则功能写完也验不了
+- token 里已有的信息（`role`）要主动用起来，别再多查一次库
+
+---
+
 ## 汇总
 
 | Bug | 层 | 类型 | 一句话 |
@@ -567,10 +914,45 @@ public Result<Void> handleNoResource(NoResourceFoundException e) {
 | 12 | 环境 | 工具链不可复现 | Maven 不在 PATH、java 1.8、Wrapper 未落地 |
 | 13 | 依赖 | 版本冲突 | springdoc 2.6.0 与 Boot 3.5 不兼容，Knife4j 空白无接口 |
 | 14 | Interfaces | 异常处理缺陷 | 兜底 catch-all 把 favicon.ico"资源不存在"当 500 打 ERROR 刷屏 |
+| 15 | Domain | 状态机路径缺口 | 网单洗后付先推进到 7 后：next 拦未付清、finalPay 限 5/6，订单永久卡死 |
+| 16 | Interfaces | 横向越权 IDOR | 订单接口只认订单 id 不认操作人：任意 token 可操作任意订单 |
+| 17 | Common | 异常类型选错 | `OrderStatus.fromCode` 抛 `IllegalAccessError`（Error），全局处理器接不住 → 非 JSON 500 |
+| 18 | Application | 标识符生成缺陷 | 订单号用秒级时间戳，同秒两笔必撞 `uk_order_no` |
+| 19 | Application | 并发竞态 | 读-改-写丢更新：并发推进同一单会覆盖对方状态，需 CAS |
+| 20 | Interfaces | 错误信息误导 | 管理员 storeId 为 NULL（设计如此）被当成"旧 token 需重登"，403 报成了 401 |
 
 ---
 
 ## 测试通过的功能
+
+### 2026-09-10 订单模块第 1 步（S1.3~S1.5：校验/身份 + 并发保护 + 列表）
+
+真机验收 37 项全通过（脚本 `C:\tmp\verify-orders.sh`），并发专项 1 项（`C:\tmp\verify-race.sh`）：
+
+| 功能 | 状态 |
+|---|---|
+| 员工 token 建单/支付/推进/查列表 | ✅ |
+| 顾客 token 调 next/pay/final-pay → 401 | ✅ |
+| 顾客 A 查顾客 B 订单 → 403；二店店长查一店订单 → 403 | ✅ |
+| 二店店长列表看不到一店数据（total=0） | ✅ |
+| admin（无门店）→ 403 管理员账号不隶属门店，提示用店长账号 | ✅ |
+| 无 token → 401 | ✅ |
+| 列表分页 page/pageSize/total/totalPages 正确，明细不参与列表查询 | ✅ |
+| 状态筛选 `?status=2` | ✅ |
+| 空明细 / 数量 0 / 缺分类 / 门店单缺顾客 → 400（可读消息，不是 500） | ✅ |
+| 非法 source=99 / status=99 → 400 | ✅ |
+| 请求体 JSON 语法错 → 400 请求体格式不正确 | ✅ |
+| 分页 page=abc → 400 参数格式不正确 | ✅ |
+| 支付金额不足 / 为负 → 业务拦截（金额校验加固后） | ✅ |
+| 不存在的订单 → 404 | ✅ |
+| 全链路状态推进 1→2→3→4→5→8 + 终态不可再推进 | ✅ |
+| 订单号格式 YX+18 位数字，操作人 staffId 落库 | ✅ |
+| **并发 CAS**：行锁拉长窗口 → 一 200 一 409，只推进一格 | ✅ |
+| 中文备注 UTF-8 落库（hex 校验，非控制台显示） | ✅ |
+
+单测 42 个（domain 17 + application 25）全绿。
+
+### 早期手工验收（订单基础链路，2026-09 初）
 
 | 功能 | 状态 |
 |---|---|

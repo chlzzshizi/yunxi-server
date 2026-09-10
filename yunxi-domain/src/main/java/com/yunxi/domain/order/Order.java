@@ -54,9 +54,35 @@ public class Order {
         if (this.status != OrderStatus.PENDING_PAY) {
             throw new BusinessException("当前状态不允许支付: 状态=" + this.status.getCode());
         }
+        // 金额校验：只允许"全额"（先付）或"0"（洗后付占位），
+        // 否则 order 会带着半吊子 paidAmount 进入后续状态（终态检查才拦就晚了）
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) < 0) {
+            throw new BusinessException("支付金额不能为空或负数");
+        }
+        if (amount.compareTo(this.totalAmount) != 0
+                && amount.compareTo(BigDecimal.ZERO) != 0) {
+            throw new BusinessException("支付金额不正确：先付需付全额("
+                    + this.totalAmount + ")，洗后付传 0");
+        }
         this.payMethod = payMethod;
         this.paidAmount = amount;           // 先付=full，洗后付=0
         this.status = OrderStatus.PAID;     // 1 → 2
+    }
+
+    /** 创建订单时一次性填写网单要素（后续不可改）。全为 null 时跳过 */
+    public void fillOrderInfo(LocalDateTime appointmentTime,
+                              String deliveryAddress, String remark) {
+        if (appointmentTime == null && deliveryAddress == null && remark == null) {
+            return;
+        }
+        this.appointmentTime = appointmentTime;
+        this.deliveryAddress = deliveryAddress;
+        this.remark = remark;
+    }
+
+    /** 记录本次操作的员工（订单留痕：谁推进的状态、谁收的款） */
+    public void recordOperator(Long staffId) {
+        this.staffId = staffId;
     }
     /** 正常推进 — 根据当前状态和来源自动路由 */
     public void updateStatus() {
@@ -96,10 +122,14 @@ public class Order {
         }
     }
 
-    /** 洗后付结账 — 状态 5 或 6 → 8 */
+    /** 洗后付结账 — 状态 5(门店待取件) / 6(网单派送中) / 7(网单已送达) → 8
+     *  修复（2026-09-10）：原实现只允许 5/6。网单洗后付若先推进到 7"已送达"，
+     *  next 会被"未付清"拦、finalPay 又被状态限制拦 —— 订单永久卡死。
+     *  配送是物流事实，不该被付款状态阻断，故补上 7。 */
     public void finalPay(PayMethod payMethod) {
         if (this.status != OrderStatus.PENDING_PICKUP
-                && this.status != OrderStatus.DELIVERING) {
+                && this.status != OrderStatus.DELIVERING
+                && this.status != OrderStatus.DELIVERED) {
             throw new BusinessException("当前状态不允许洗后付结账: 状态="
                     + this.status.getCode());
         }

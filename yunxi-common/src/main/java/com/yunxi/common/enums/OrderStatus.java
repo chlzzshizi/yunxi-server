@@ -16,12 +16,19 @@ public enum OrderStatus {
         this.code = code;
         this.name = name;
     }
-public static OrderStatus fromCode(int code){
+    /**
+     * 数字码 → 枚举。
+     * 注意抛的是 IllegalArgumentException（Exception 的子类），
+     * 不是 IllegalAccessError（Error 的子类，GlobalExceptionHandler 的
+     * @ExceptionHandler(Exception.class) 接不住，会漏成非 JSON 的 500）。
+     * 与 OrderSource.fromCode / PayMethod.fromCode 保持一致。
+     */
+    public static OrderStatus fromCode(int code){
         for(OrderStatus s : values()){
             if(s.code == code)return s;
         }
-        throw new IllegalAccessError("没有这个状态:"+code);
-}
+        throw new IllegalArgumentException("没有这个状态:"+code);
+    }
     public int getCode() {return code;}
     public String getName(){return name;}
 }

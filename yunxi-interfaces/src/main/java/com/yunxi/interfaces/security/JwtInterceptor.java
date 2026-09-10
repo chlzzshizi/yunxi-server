@@ -56,6 +56,7 @@ public class JwtInterceptor implements HandlerInterceptor {
             request.setAttribute("staffId", jwtUtil.getStaffId(token));
             request.setAttribute("username", jwtUtil.getUsername(token));
             request.setAttribute("role", jwtUtil.getRole(token));
+            request.setAttribute("storeId", jwtUtil.getStoreId(token)); // 旧 token 无此 claim 时为 null
         }
 
         return true;  // 放行

@@ -51,6 +51,49 @@
         SELECT * FROM orders WHERE order_no = #{orderNo}
     </select>
 
+    <!-- 带状态条件的更新（乐观并发控制）：
+         WHERE 里多带一个 status 判断，数据库原子的比较-交换（CAS）。
+         数据库里状态若已被别人改走，受影响行数=0，UPDATE 什么也不做。
+         注意：这里用 #{po.xxx} 取的是 OrderPO 的字段（@Param("po")）。 -->
+    <update id="updateWithStatusCheck">
+        UPDATE orders
+        SET status           = #{po.status},
+            paid_amount      = #{po.paidAmount},
+            pay_method       = #{po.payMethod},
+            final_pay_method = #{po.finalPayMethod},
+            staff_id         = #{po.staffId},
+            express_no       = #{po.expressNo},
+            finish_time      = #{po.finishTime}
+        WHERE id = #{po.id}
+          AND status = #{expectedStatus}
+    </update>
+
+    <!-- 分页查询共用的一段 WHERE：传了才筛（<if test="xxx != null">）。
+         用 <sql>/<include> 抽出来，避免 selectPage 和 countBy 的条件写两遍写歪。 -->
+    <sql id="pageConditions">
+        <where>
+            <if test="storeId != null">    AND store_id    = #{storeId}    </if>
+            <if test="customerId != null"> AND customer_id = #{customerId} </if>
+            <if test="status != null">     AND status      = #{status}     </if>
+        </where>
+    </sql>
+
+    <!-- 分页查询：ORDER BY id DESC 让新单在前。
+         用 id 而不是 create_time 排序：id 自增天然唯一且有序，
+         同一秒创建的订单不会因为时间相同而顺序抖动，也吃得上的主键索引。 -->
+    <select id="selectPage" resultMap="OrderResultMap">
+        SELECT * FROM orders
+        <include refid="pageConditions"/>
+        ORDER BY id DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <!-- 总条数 -->
+    <select id="countBy" resultType="long">
+        SELECT COUNT(*) FROM orders
+        <include refid="pageConditions"/>
+    </select>
+
     <!-- 更新订单 -->
     <update id="update" parameterType="com.yunxi.infrastructure.persistence.po.OrderPO">
         UPDATE orders

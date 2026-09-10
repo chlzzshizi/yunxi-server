@@ -49,6 +49,16 @@ public class OrderRepositoryImpl implements OrderRepository {
     }
 
     @Override
+    public boolean updateStatusCas(Order order, OrderStatus expectedStatus) {
+        if (order.getId() == null) {
+            throw new IllegalStateException("订单尚未落库，不能做状态条件更新");
+        }
+        // 受影响行数 > 0 才算成功：0 行说明 WHERE status = 期望值 没匹配上
+        return orderMapper.updateWithStatusCheck(
+                toOrderPO(order), expectedStatus.getCode()) > 0;
+    }
+
+    @Override
     public Optional<Order> findById(Long id) {
         OrderPO po = orderMapper.selectById(id);
         if (po == null) {
@@ -66,6 +76,24 @@ public class OrderRepositoryImpl implements OrderRepository {
         }
         List<OrderItemPO> itemPOs = orderItemMapper.selectByOrderId(po.getId());
         return Optional.of(toOrder(po, itemPOs));
+    }
+
+    @Override
+    public List<Order> findPage(Long storeId, Long customerId, OrderStatus status,
+                                int offset, int limit) {
+        List<OrderPO> pos = orderMapper.selectPage(storeId, customerId,
+                status == null ? null : status.getCode(), offset, limit);
+        // 刻意不查明细：列表页不展示衣物清单，
+        // 查了就是 1 次主查询 + N 次明细查询（N+1 问题）
+        return pos.stream()
+                .map(po -> toOrder(po, List.of()))
+                .toList();
+    }
+
+    @Override
+    public long count(Long storeId, Long customerId, OrderStatus status) {
+        return orderMapper.countBy(storeId, customerId,
+                status == null ? null : status.getCode());
     }
 
     // ═══════════════════ 内部转换方法 ═══════════════════

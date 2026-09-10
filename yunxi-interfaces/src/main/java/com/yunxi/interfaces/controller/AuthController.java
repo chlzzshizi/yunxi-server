@@ -55,8 +55,9 @@ public class AuthController {
         if (!passwordEncoder.matches(password, staff.getPassword())) {
             return Result.fail(401, "用户名或密码错误");
         }
-        // 4. 生成 Token
-        String token = jwtUtil.generateToken(staff.getId(), staff.getUsername(), staff.getRole());
+        // 4. 生成 Token（带 storeId：门店单归属校验只信 token 不信请求体）
+        String token = jwtUtil.generateToken(staff.getId(), staff.getUsername(),
+                staff.getRole(), staff.getStoreId());
 
         // 5. 返回
         return Result.ok(Map.of("token", token));

@@ -33,9 +33,10 @@ public class JwtUtil {
      * @param staffId   员工 ID
      * @param username  用户名
      * @param role      角色（0=管理员 1=店长）
+     * @param storeId   所属门店 ID（订单归属校验用，不信请求体只信 token）
      * @return JWT 字符串
      */
-    public String generateToken(Long staffId, String username, int role) {
+    public String generateToken(Long staffId, String username, int role, Long storeId) {
         Date now = new Date();
         Date expireDate = new Date(now.getTime() + expiration);
 
@@ -43,6 +44,7 @@ public class JwtUtil {
                 .subject(username)                   // 主题 = 用户名
                 .claim("staffId", staffId)           // 自定义字段：员工 ID
                 .claim("role", role)                  // 自定义字段：角色
+                .claim("storeId", storeId)           // 自定义字段：所属门店
                 .claim("type", "staff")              // 身份类型：员工
                 .issuedAt(now)                        // 签发时间
                 .expiration(expireDate)               // 过期时间
@@ -109,6 +111,11 @@ public class JwtUtil {
     /** 从 Token 取角色 */
     public Integer getRole(String token) {
         return parseToken(token).get("role", Integer.class);
+    }
+
+    /** 从 Token 取员工所属门店 ID（旧 token 无此 claim 时返回 null，前端会提示重新登录） */
+    public Long getStoreId(String token) {
+        return parseToken(token).get("storeId", Long.class);
     }
 
     /** 从 Token 取身份类型（staff=员工 customer=顾客） */

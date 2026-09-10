@@ -4,8 +4,11 @@ import com.yunxi.common.BusinessException;
 import com.yunxi.common.Result;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
@@ -28,6 +31,27 @@ public class GlobalExceptionHandler {
     public Result<Void> handleIllegalArgument(IllegalArgumentException e) {
         log.warn("参数错误: {}", e.getMessage());
         return Result.fail(400, e.getMessage());
+    }
+
+    /** 缺少必填请求参数（如 pay 少了 amount）→ 400，而不是 500 */
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public Result<Void> handleMissingParam(MissingServletRequestParameterException e) {
+        log.warn("缺少请求参数: {}", e.getParameterName());
+        return Result.fail(400, "缺少参数: " + e.getParameterName());
+    }
+
+    /** 参数类型不对（如 id=abc、amount=xyz）→ 400 */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public Result<Void> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
+        log.warn("参数类型错误: {} = {}", e.getName(), e.getValue());
+        return Result.fail(400, "参数格式不正确: " + e.getName());
+    }
+
+    /** 请求体读不出来（JSON 语法错、日期格式错、字段类型不匹配）→ 400 */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public Result<Void> handleNotReadable(HttpMessageNotReadableException e) {
+        log.warn("请求体解析失败: {}", e.getMessage());
+        return Result.fail(400, "请求体格式不正确");
     }
 
     /** 静态资源不存在（浏览器自动请求 favicon.ico 等）→ 返回 404，不视为服务器错误 */
