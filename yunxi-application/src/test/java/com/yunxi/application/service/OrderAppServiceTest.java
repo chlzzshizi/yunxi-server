@@ -10,6 +10,10 @@ import com.yunxi.common.Result;
 import com.yunxi.domain.order.Order;
 import com.yunxi.domain.order.OrderItem;
 import com.yunxi.domain.order.OrderRepository;
+import com.yunxi.domain.price.ClothesCategory;
+import com.yunxi.domain.price.ClothesPrice;
+import com.yunxi.domain.price.PriceRepository;
+import com.yunxi.domain.price.WashType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -19,6 +23,7 @@ import org.springframework.dao.DuplicateKeyException;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -45,6 +50,7 @@ import static org.mockito.Mockito.when;
 class OrderAppServiceTest {
 
     private OrderRepository orderRepository;
+    private PriceRepository priceRepository;
     private OrderAppService orderAppService;
 
     private static final BigDecimal TOTAL = new BigDecimal("30.00");
@@ -58,10 +64,16 @@ class OrderAppServiceTest {
     @BeforeEach
     void setUp() {
         orderRepository = mock(OrderRepository.class);
-        orderAppService = new OrderAppService(orderRepository);
+        priceRepository = mock(PriceRepository.class);
+        orderAppService = new OrderAppService(orderRepository, priceRepository);
         // CAS 更新默认"成功"（Mockito 对 boolean 默认返回 false，
         // 不显式打桩的话每个状态操作测试都会撞上 409）
         when(orderRepository.updateStatusCas(any(), any())).thenReturn(true);
+        // 后端算价的默认价目表：现有测试的明细都是 (分类1, 洗涤方式1)，
+        // 价目表里这个组合 = 15.00 —— 与 ITEMS 的"单价15.00 × 2 = 总价30.00"对齐，
+        // 所以既有断言一条都不用改
+        when(priceRepository.findPricesByCategoryIds(any())).thenReturn(Map.of(
+                1L, List.of(new ClothesPrice(1L, 1L, new BigDecimal("15.00")))));
     }
 
     /** 造一个已落库的门店单（含 ID） */
@@ -137,6 +149,113 @@ class OrderAppServiceTest {
         }
     }
 
+    // ════════════════ 后端算价 ════════════════
+
+    @Nested
+    @DisplayName("后端算价：单价只认价目表")
+    class Pricing {
+
+        @Test
+        @DisplayName("外部传的单价不作数 —— 被价目表覆盖，总价按库里的价重算")
+        void priceComesFromRepositoryNotFromCaller() {
+            // 直接构造带 1.00 的明细：HTTP 层已经没有这个字段了，
+            // 这里要证明的是**服务层**也不信外面给的价
+            List<OrderItem> cheat = List.of(
+                    new OrderItem(1L, 1L, 2, new BigDecimal("1.00"), null));
+
+            Result<Order> result = orderAppService.createOrder(
+                    STORE_A, 100L, OrderSource.STORE, cheat, 9L, OrderExtras.EMPTY);
+
+            assertThat(result.data().getItems().get(0).getUnitPrice())
+                    .isEqualByComparingTo("15.00");
+            assertThat(result.data().getTotalAmount()).isEqualByComparingTo("30.00");
+        }
+
+        @Test
+        @DisplayName("3 条明细只查 1 次价目表（不是 N+1）")
+        void queriesPriceTableOnce() {
+            when(priceRepository.findPricesByCategoryIds(any())).thenReturn(Map.of(
+                    1L, List.of(new ClothesPrice(1L, 1L, new BigDecimal("15.00")),
+                            new ClothesPrice(1L, 2L, new BigDecimal("35.00")),
+                            new ClothesPrice(1L, 3L, new BigDecimal("8.00")))));
+            List<OrderItem> three = List.of(
+                    new OrderItem(1L, 1L, 1, null),
+                    new OrderItem(1L, 2L, 1, null),
+                    new OrderItem(1L, 3L, 1, null));
+
+            Result<Order> result = orderAppService.createOrder(
+                    STORE_A, 100L, OrderSource.STORE, three, 9L, OrderExtras.EMPTY);
+
+            verify(priceRepository, times(1)).findPricesByCategoryIds(any());
+            assertThat(result.data().getTotalAmount()).isEqualByComparingTo("58.00");
+        }
+
+        @Test
+        @DisplayName("价目表没有这个组合 → 400 带明细序号，且不落库（配置缺口不是 500）")
+        void missingPriceRow() {
+            when(priceRepository.findPricesByCategoryIds(any())).thenReturn(Map.of());
+
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    STORE_A, 100L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("第 1 条明细的衣物分类或洗涤方式不存在");
+
+            verify(orderRepository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("价格为 0（羽绒服·普洗）→ 400 说清是哪个分类不支持哪种洗法")
+        void zeroPriceMeansUnsupported() {
+            when(priceRepository.findPricesByCategoryIds(any())).thenReturn(Map.of(
+                    13L, List.of(new ClothesPrice(13L, 1L, new BigDecimal("0.00")))));
+            when(priceRepository.findCategoryById(13L))
+                    .thenReturn(Optional.of(category(13L, "羽绒服")));
+            when(priceRepository.findAllWashTypes())
+                    .thenReturn(List.of(washType(1L, "普洗")));
+
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    STORE_A, 100L, OrderSource.STORE,
+                    List.of(new OrderItem(13L, 1L, 1, null)), 9L, OrderExtras.EMPTY))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("「羽绒服」不支持「普洗」");
+        }
+
+        @Test
+        @DisplayName("空明细先被拦下 —— 不白查一次价目表")
+        void emptyItemsNeverTouchesPriceTable() {
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    STORE_A, 100L, OrderSource.STORE, List.of(), 9L, OrderExtras.EMPTY))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("至少需要一条明细");
+
+            verify(priceRepository, never()).findPricesByCategoryIds(any());
+        }
+
+        @Test
+        @DisplayName("明细还没定价就算钱 → 大声报错，不是 NPE")
+        void subtotalWithoutPriceFails() {
+            OrderItem unpriced = new OrderItem(1L, 1L, 1, null);
+
+            assertThatThrownBy(unpriced::subtotal)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("后端算价");
+        }
+
+        private ClothesCategory category(long id, String name) {
+            ClothesCategory c = new ClothesCategory();
+            c.setId(id);
+            c.setName(name);
+            return c;
+        }
+
+        private WashType washType(long id, String name) {
+            WashType w = new WashType();
+            w.setId(id);
+            w.setName(name);
+            return w;
+        }
+    }
+
     // ════════════════ 查询归属 ════════════════
 
     @Nested
@@ -148,7 +267,7 @@ class OrderAppServiceTest {
         void notFound() {
             when(orderRepository.findById(404L)).thenReturn(Optional.empty());
 
-            assertThatThrownBy(() -> orderAppService.getOrder(404L, "staff", 9L, STORE_A))
+            assertThatThrownBy(() -> orderAppService.getOrder(404L, "staff", 9L))
                     .isInstanceOf(BusinessException.class)
                     .extracting("code").isEqualTo(404);
         }
@@ -159,7 +278,7 @@ class OrderAppServiceTest {
             Order order = persistedOrder(1L, STORE_A, 100L);
             stubFind(order);
 
-            Result<Order> result = orderAppService.getOrder(1L, "customer", 100L, null);
+            Result<Order> result = orderAppService.getOrder(1L, "customer", 100L);
             assertThat(result.data().getCustomerId()).isEqualTo(100L);
         }
 
@@ -169,41 +288,20 @@ class OrderAppServiceTest {
             Order order = persistedOrder(1L, STORE_A, 100L);
             stubFind(order);
 
-            assertThatThrownBy(() -> orderAppService.getOrder(1L, "customer", 999L, null))
+            assertThatThrownBy(() -> orderAppService.getOrder(1L, "customer", 999L))
                     .isInstanceOf(BusinessException.class)
                     .extracting("code").isEqualTo(403);
         }
 
         @Test
-        @DisplayName("员工查本店订单 → 放行")
-        void staffOwnStore() {
-            Order order = persistedOrder(1L, STORE_A, 100L);
+        @DisplayName("员工查别家店的订单 → 200（跨店不隔离：所有店长管所有订单）")
+        void staffSeesAnyStore() {
+            // 这单属于 STORE_B，员工来自哪儿不重要 —— 查单根本不传门店
+            Order order = persistedOrder(1L, STORE_B, 100L);
             stubFind(order);
 
-            Result<Order> result = orderAppService.getOrder(1L, "staff", 9L, STORE_A);
+            Result<Order> result = orderAppService.getOrder(1L, "staff", 9L);
             assertThat(result.code()).isEqualTo(200);
-        }
-
-        @Test
-        @DisplayName("员工查其他门店订单 → 403（跨店隔离）")
-        void staffCannotSeeOtherStore() {
-            Order order = persistedOrder(1L, STORE_A, 100L);
-            stubFind(order);
-
-            assertThatThrownBy(() -> orderAppService.getOrder(1L, "staff", 9L, STORE_B))
-                    .isInstanceOf(BusinessException.class)
-                    .extracting("code").isEqualTo(403);
-        }
-
-        @Test
-        @DisplayName("旧 token 无 storeId → 401 提示重新登录（不是 403）")
-        void staffWithoutStoreId() {
-            Order order = persistedOrder(1L, STORE_A, 100L);
-            stubFind(order);
-
-            assertThatThrownBy(() -> orderAppService.getOrder(1L, "staff", 9L, null))
-                    .isInstanceOf(BusinessException.class)
-                    .extracting("code").isEqualTo(401);
         }
     }
 
@@ -285,19 +383,21 @@ class OrderAppServiceTest {
     class ListOrders {
 
         @Test
-        @DisplayName("员工查列表 → 只按本店筛选（不传 customerId）")
-        void staffSeesOwnStoreOnly() {
-            when(orderRepository.count(STORE_A, null, null)).thenReturn(2L);
-            when(orderRepository.findPage(STORE_A, null, null, 0, 20))
+        @DisplayName("员工查列表 → 不按门店筛（所有店的单在同一页）")
+        void staffSeesAllStores() {
+            // 两条单分属不同门店，都得出现在员工列表里
+            when(orderRepository.count(null, null, null)).thenReturn(2L);
+            when(orderRepository.findPage(null, null, null, 0, 20))
                     .thenReturn(List.of(persistedOrder(2L, STORE_A, 100L),
-                            persistedOrder(1L, STORE_A, 100L)));
+                            persistedOrder(1L, STORE_B, 100L)));
 
             Result<PageResult<Order>> result = orderAppService.listOrders(
-                    "staff", 9L, STORE_A, null, 1, 20);
+                    "staff", 9L, null, 1, 20);
 
             assertThat(result.data().total()).isEqualTo(2L);
             assertThat(result.data().list()).hasSize(2);
             assertThat(result.data().totalPages()).isEqualTo(1);
+            verify(orderRepository).count(null, null, null);   // 关键：没夹带门店条件
         }
 
         @Test
@@ -308,7 +408,7 @@ class OrderAppServiceTest {
                     .thenReturn(List.of(persistedOrder(1L, STORE_A, 100L)));
 
             Result<PageResult<Order>> result = orderAppService.listOrders(
-                    "customer", 100L, null, null, 1, 20);
+                    "customer", 100L, null, 1, 20);
 
             assertThat(result.data().list()).hasSize(1);
             // 关键：查的是 customerId=100，没夹带门店条件
@@ -316,21 +416,12 @@ class OrderAppServiceTest {
         }
 
         @Test
-        @DisplayName("旧 token 无 storeId 的员工查列表 → 401")
-        void staffWithoutStoreIdRejected() {
-            assertThatThrownBy(() -> orderAppService.listOrders(
-                    "staff", 9L, null, null, 1, 20))
-                    .isInstanceOf(BusinessException.class)
-                    .extracting("code").isEqualTo(401);
-        }
-
-        @Test
         @DisplayName("页码越界归一化：page=0 → 1、pageSize=9999 → 100")
         void pageParamsClamped() {
-            when(orderRepository.count(STORE_A, null, null)).thenReturn(0L);
+            when(orderRepository.count(null, null, null)).thenReturn(0L);
 
             Result<PageResult<Order>> result = orderAppService.listOrders(
-                    "staff", 9L, STORE_A, null, 0, 9999);
+                    "staff", 9L, null, 0, 9999);
 
             assertThat(result.data().page()).isEqualTo(1);
             assertThat(result.data().pageSize()).isEqualTo(100);
@@ -341,16 +432,16 @@ class OrderAppServiceTest {
         @Test
         @DisplayName("第二页的 offset = (page-1)*pageSize")
         void secondPageOffset() {
-            when(orderRepository.count(STORE_A, null, OrderStatus.WASHING)).thenReturn(30L);
-            when(orderRepository.findPage(STORE_A, null, OrderStatus.WASHING, 20, 20))
+            when(orderRepository.count(null, null, OrderStatus.WASHING)).thenReturn(30L);
+            when(orderRepository.findPage(null, null, OrderStatus.WASHING, 20, 20))
                     .thenReturn(List.of());
 
             Result<PageResult<Order>> result = orderAppService.listOrders(
-                    "staff", 9L, STORE_A, OrderStatus.WASHING, 2, 20);
+                    "staff", 9L, OrderStatus.WASHING, 2, 20);
 
             assertThat(result.data().total()).isEqualTo(30L);
             assertThat(result.data().totalPages()).isEqualTo(2);
-            verify(orderRepository).findPage(STORE_A, null, OrderStatus.WASHING, 20, 20);
+            verify(orderRepository).findPage(null, null, OrderStatus.WASHING, 20, 20);
         }
     }
 

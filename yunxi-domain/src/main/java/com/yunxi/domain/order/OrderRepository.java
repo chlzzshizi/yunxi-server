@@ -15,7 +15,9 @@ public interface OrderRepository {
     /**
      * 分页查询订单（按创建时间倒序，新单在前）。
      *
-     * @param storeId  门店筛选，null=不筛（顾客端传 null）
+     * @param storeId  门店筛选，null=不筛。两端现在都传 null：顾客只按 customerId 筛，
+     *                 员工不限门店（所有店长管所有订单，门店不是权限边界）。
+     *                 参数保留：将来要做"只看某店"的筛选时直接可用
      * @param customerId 顾客筛选，null=不筛（员工端传 null）
      * @param status   状态筛选，null=全部
      * @param offset   跳过多少条 = (page-1)*pageSize

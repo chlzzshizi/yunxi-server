@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.yunxi.infrastructure.persistence.mapper.ClothesCategoryMapper">
+
+    <resultMap id="ClothesCategoryResultMap"
+               type="com.yunxi.infrastructure.persistence.po.ClothesCategoryPO">
+        <id     column="id"         property="id"/>
+        <result column="name"       property="name"/>
+        <result column="icon"       property="icon"/>
+        <result column="parent_id"  property="parentId"/>
+        <result column="sort_order" property="sortOrder"/>
+    </resultMap>
+
+    <!-- 一级分类排在前面：ORDER BY 里把 parent_id IS NULL 放第一位，
+         MySQL 里 null 排最前，加这个表达式是为了让顺序不受 null 排序规则影响 -->
+    <select id="selectAll" resultMap="ClothesCategoryResultMap">
+        SELECT * FROM clothes_categories
+        ORDER BY (parent_id IS NOT NULL), parent_id, sort_order, id
+    </select>
+
+    <select id="selectById" resultMap="ClothesCategoryResultMap">
+        SELECT * FROM clothes_categories WHERE id = #{id}
+    </select>
+
+</mapper>

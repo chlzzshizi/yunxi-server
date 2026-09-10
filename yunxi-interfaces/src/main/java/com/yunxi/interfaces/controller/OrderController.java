@@ -57,9 +57,8 @@ public class OrderController {
             if (it.quantity() == null || it.quantity() <= 0) {
                 return Result.fail(400, no + "数量必须为正整数");
             }
-            if (it.unitPrice() == null || it.unitPrice().signum() < 0) {
-                return Result.fail(400, no + "单价不能为空或负数");
-            }
+            // 这里**不再校验单价**：价格由后端算（OrderAppService.priceItems）。
+            // 请求体里根本没有这个字段了，前端传了也会被 Spring 忽略。
         }
         // 枚举转换失败会抛 IllegalArgumentException，由 GlobalExceptionHandler 统一转 400
         OrderSource source = OrderSource.fromCode(request.source());
@@ -85,11 +84,11 @@ public class OrderController {
             }
         }
 
-        // ── DTO → domain ──
+        // ── DTO → domain（单价留空，由 OrderAppService 查价目表补）──
         List<OrderItem> items = reqItems.stream()
                 .map(it -> new OrderItem(
                         it.categoryId(), it.washTypeId(),
-                        it.quantity(), it.unitPrice(), it.photos()))
+                        it.quantity(), it.photos()))
                 .toList();
         OrderExtras extras = new OrderExtras(
                 request.appointmentTime(), request.deliveryAddress(), request.remark());
@@ -100,7 +99,7 @@ public class OrderController {
 
     /**
      * 订单列表（分页 + 可选状态筛选）
-     * 员工看本店、顾客看自己的 —— 归属由 token 决定，前端传不了也改不了。
+     * 员工看全部（不限门店）、顾客看自己的 —— 归属由 token 决定，前端传不了也改不了。
      * 例：GET /api/orders?status=2&page=1&pageSize=20
      */
     @GetMapping
@@ -113,15 +112,12 @@ public class OrderController {
         Long requesterId = isStaff
                 ? (Long) http.getAttribute("staffId")
                 : (Long) http.getAttribute("customerId");
-        // 管理员 / 旧 token 在这里就被挡掉，不会带着 null 门店混进查询
-        Long requesterStoreId = isStaff ? requireStaffStore(http) : null;
         // 非法的状态码（如 status=99）会抛 IllegalArgumentException → 全局处理器转 400
         OrderStatus filter = status == null ? null : OrderStatus.fromCode(status);
-        return orderAppService.listOrders(type, requesterId, requesterStoreId,
-                filter, page, pageSize);
+        return orderAppService.listOrders(type, requesterId, filter, page, pageSize);
     }
 
-    /** 查询订单（带归属校验：顾客只能看自己的、员工只能看本店的） */
+    /** 查询订单（带归属校验：顾客只能看自己的、员工不限门店） */
     @GetMapping("/{id}")
     public Result<Order> getOrder(@PathVariable Long id, HttpServletRequest http) {
         String type = (String) http.getAttribute("type");
@@ -129,8 +125,7 @@ public class OrderController {
         Long requesterId = isStaff
                 ? (Long) http.getAttribute("staffId")
                 : (Long) http.getAttribute("customerId");
-        Long requesterStoreId = isStaff ? requireStaffStore(http) : null;
-        return orderAppService.getOrder(id, type, requesterId, requesterStoreId);
+        return orderAppService.getOrder(id, type, requesterId);
     }
 
     /** 支付（仅员工） */
@@ -170,11 +165,16 @@ public class OrderController {
     }
 
     /**
-     * 员工所属门店。
+     * 门店单的归属门店 —— 只信 token 里的 storeId（建单以外的订单操作都不再需要它）。
+     *
+     * 它现在的角色只是**默认值**："门店单落在店长自己那家店"。不是权限边界 ——
+     * 所有店长都能管理所有门店的订单（设计文档 §4.2），所以拿不到 storeId
+     * 也不再意味着"越权"，而是"这单不知道算哪个店"。
      *
      * storeId 为 null 有**两种**完全不同的原因，不能糊成一句"请重新登录"：
      *   - 管理员（role=0）：staff.store_id 按设计就是 NULL（不隶属门店），
-     *     他重登一百次还是 null —— 该说清楚"订单是门店维度的事务，请用店长账号"
+     *     他重登一百次还是 null —— 订单要有"物理的店"（取件地址落在哪家店），
+     *     所以该说清楚"建门店单请用店长账号"
      *   - 店长（role=1）：店长必有门店，拿不到只可能是旧 token 缺 storeId claim，
      *     这才是"重新登录就能解决"的情况
      */
@@ -185,7 +185,7 @@ public class OrderController {
         }
         Integer role = (Integer) http.getAttribute("role");
         if (role != null && role == 0) {
-            throw new BusinessException(403, "管理员账号不隶属门店，订单操作请使用店长账号");
+            throw new BusinessException(403, "管理员账号不隶属门店，建门店单请使用店长账号");
         }
         throw new BusinessException(401, "登录信息已升级，请重新登录");
     }

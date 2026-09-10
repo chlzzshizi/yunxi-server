@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.yunxi.infrastructure.persistence.mapper.ClothesPriceMapper">
+
+    <resultMap id="ClothesPriceResultMap"
+               type="com.yunxi.infrastructure.persistence.po.ClothesPricePO">
+        <id     column="id"           property="id"/>
+        <result column="category_id"  property="categoryId"/>
+        <result column="wash_type_id" property="washTypeId"/>
+        <result column="price"        property="price"/>
+    </resultMap>
+
+    <!-- 固定排序：同一分类的三行连在一起，且普洗在前 ——
+         前端拿到的数组顺序稳定，渲染价目表不会每次刷新都换位置 -->
+    <select id="selectAll" resultMap="ClothesPriceResultMap">
+        SELECT * FROM clothes_prices ORDER BY category_id, wash_type_id
+    </select>
+
+    <!-- 写入价格：INSERT ... ON DUPLICATE KEY UPDATE 一条语句搞定"有则改无则插"。
+         为什么不先 SELECT 再决定 INSERT/UPDATE：那是"两趟"，两趟之间别人插了一条
+         就会撞唯一键报错。交给数据库一条语句原子完成，并发下也不会出错。
+
+         注意 value 直接写 #{price}，不用 VALUES(price)——后者在 MySQL 8.0.20+
+         已废弃（会有 deprecation warning），8.0.46 上照样能跑但不该再用。 -->
+    <insert id="upsert">
+        INSERT INTO clothes_prices (category_id, wash_type_id, price)
+        VALUES (#{categoryId}, #{washTypeId}, #{price})
+        ON DUPLICATE KEY UPDATE price = #{price}
+    </insert>
+
+    <!-- 批量查：foreach 拼 IN (?, ?, ?)。
+         集合为空时不该走到这儿（IN () 是语法错），调用方先挡一道 -->
+    <select id="selectByCategoryIds" resultMap="ClothesPriceResultMap">
+        SELECT * FROM clothes_prices
+        WHERE category_id IN
+        <foreach collection="categoryIds" item="cid" open="(" separator="," close=")">
+            #{cid}
+        </foreach>
+        ORDER BY category_id, wash_type_id
+    </select>
+
+</mapper>

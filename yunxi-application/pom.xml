@@ -29,6 +29,13 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter</artifactId>
         </dependency>
+        <!-- 显式声明 spring-tx：@Transactional 就来自这里。
+             以前能编译过是因为 mybatis-spring-boot-starter 顺带传了进来 ——
+             靠别人的传递依赖拿到自己直接用的注解，哪天别人换实现就断了 -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-tx</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.mapstruct</groupId>
             <artifactId>mapstruct</artifactId>

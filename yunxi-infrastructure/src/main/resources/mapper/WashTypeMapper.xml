@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.yunxi.infrastructure.persistence.mapper.WashTypeMapper">
+
+    <resultMap id="WashTypeResultMap"
+               type="com.yunxi.infrastructure.persistence.po.WashTypePO">
+        <id     column="id"          property="id"/>
+        <result column="name"        property="name"/>
+        <result column="description" property="description"/>
+    </resultMap>
+
+    <!-- 按 id 排 = 普洗(1) / 精洗(2) / 单熨(3)，页面上的列顺序就是它 -->
+    <select id="selectAll" resultMap="WashTypeResultMap">
+        SELECT * FROM wash_types ORDER BY id
+    </select>
+
+</mapper>
