@@ -1,6 +1,8 @@
 package com.yunxi.application.service;
 
 import com.yunxi.application.dto.OrderExtras;
+import com.yunxi.application.dto.OrderItemCommand;
+import com.yunxi.application.dto.OrderView;
 import com.yunxi.common.BusinessException;
 import com.yunxi.common.PageResult;
 import com.yunxi.common.Result;
@@ -23,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -60,7 +63,7 @@ public class OrderAppService {
      * @param storeId        归属门店（门店单=员工 token 里的店；网单=下单时选的店）
      * @param customerId     顾客（门店单=员工输入；网单=顾客 token 身份）
      * @param source         门店单 / 网单
-     * @param items          订单明细列表
+     * @param commands       订单明细（应用层命令对象，不含价格）
      * @param operatorStaffId 操作员工（门店单必填；网单为 null）
      * @param extras         网单要素/备注（可为 OrderExtras.EMPTY）
      *
@@ -70,18 +73,21 @@ public class OrderAppService {
      * 事务本身还能继续用，所以撞号重试不会把前面的写入弄成"已回滚"状态。
      */
     @Transactional
-    public Result<Order> createOrder(Long storeId, Long customerId,
-                                     OrderSource source, List<OrderItem> items,
-                                     Long operatorStaffId, OrderExtras extras) {
+    public Result<OrderView> createOrder(Long storeId, Long customerId,
+                                         OrderSource source, List<OrderItemCommand> commands,
+                                         Long operatorStaffId, OrderExtras extras) {
         // 错误一律抛 BusinessException（GlobalExceptionHandler 统一转 Result.fail），
         // 不要在这一层 return Result.fail —— 调用方没法 catch，风格也不统一
-        if (items == null || items.isEmpty()) {
+        if (commands == null || commands.isEmpty()) {
             throw new BusinessException("订单至少需要一条明细");
         }
         // 门店单是员工代客下单——必须有人操作，谁操作的也要留痕
         if (source == OrderSource.STORE) {
             requireStaff(operatorStaffId);
         }
+        // 命令对象 → 领域明细。转换放在"校验之后、算价之前"：
+        // 转换里可能要拆箱，先让上面两条校验把空/缺字段的请求挡掉
+        List<OrderItem> items = toItems(commands);
         // 上面两个校验都在算价之前：它们不查库，早失败早省一次查询。
         // 算价必须在构造 Order **之前** —— Order 构造器会立刻累加总金额，
         // 单价没填上时分不出"0 元"和"还没算"
@@ -99,7 +105,7 @@ public class OrderAppService {
             }
             try {
                 orderRepository.save(order);
-                return Result.ok(order);
+                return Result.ok(OrderView.from(order));
             } catch (DuplicateKeyException e) {
                 log.warn("订单号冲突（第 {} 次），换号重试: {}", attempt, order.getOrderNo());
             }
@@ -119,7 +125,7 @@ public class OrderAppService {
      * @param requesterType staff / customer
      * @param requesterId   员工 ID 或顾客 ID
      */
-    public Result<Order> getOrder(Long id, String requesterType, Long requesterId) {
+    public Result<OrderView> getOrder(Long id, String requesterType, Long requesterId) {
         Order order = orderRepository.findById(id)
                 .orElseThrow(() -> new BusinessException(404, "订单不存在"));
 
@@ -127,7 +133,7 @@ public class OrderAppService {
                 && !order.getCustomerId().equals(requesterId)) {
             throw new BusinessException(403, "无权查看该订单");
         }
-        return Result.ok(order);
+        return Result.ok(OrderView.from(order));
     }
 
     /**
@@ -141,8 +147,8 @@ public class OrderAppService {
      * @param page          页码，从 1 开始（越界会归一化，不报错）
      * @param pageSize      每页条数（钳到 1~100，防止前端要 100 万条把库拖死）
      */
-    public Result<PageResult<Order>> listOrders(String requesterType, Long requesterId,
-                                                OrderStatus status, int page, int pageSize) {
+    public Result<PageResult<OrderView>> listOrders(String requesterType, Long requesterId,
+                                                    OrderStatus status, int page, int pageSize) {
         // 员工不筛任何条件（看全部店的单）；顾客只按自己的 customerId 筛
         Long customerId = "customer".equals(requesterType) ? requesterId : null;
 
@@ -150,10 +156,11 @@ public class OrderAppService {
         int safeSize = Math.min(Math.max(pageSize, 1), MAX_PAGE_SIZE);
 
         long total = orderRepository.count(null, customerId, status);
-        List<Order> list = total == 0
+        List<OrderView> list = total == 0
                 ? List.of()                          // 没数据就别再查一次了
                 : orderRepository.findPage(null, customerId, status,
-                        (safePage - 1) * safeSize, safeSize);
+                        (safePage - 1) * safeSize, safeSize)
+                        .stream().map(OrderView::from).toList();
         return Result.ok(PageResult.of(list, total, safePage, safeSize));
     }
 
@@ -197,6 +204,31 @@ public class OrderAppService {
     }
 
     // ──────────────── 内部工具 ────────────────
+
+    /**
+     * 命令对象 → 领域明细。
+     *
+     * 这一层再校验一次"字段全不全"，不是不信任 controller：
+     * 应用服务是**用例的入口**，将来还会有别的入口（定时任务、后台脚本、
+     * 别人写的第二个前端）调它，校验不能押在某一个入口的自觉上。
+     * controller 那份校验留着是为了给出更好的 400 文案（带明细序号）。
+     *
+     * 这里只做"形状"校验；"这个分类能不能洗"“价格是多少"是算价的事，不在这。
+     */
+    private List<OrderItem> toItems(List<OrderItemCommand> commands) {
+        List<OrderItem> items = new ArrayList<>(commands.size());
+        for (int i = 0; i < commands.size(); i++) {
+            OrderItemCommand c = commands.get(i);
+            int no = i + 1;
+            if (c == null || c.categoryId() == null
+                    || c.washTypeId() == null || c.quantity() == null) {
+                throw new BusinessException("第 " + no + " 条明细缺少衣物分类、洗涤方式或数量");
+            }
+            items.add(new OrderItem(c.categoryId(), c.washTypeId(),
+                    c.quantity(), c.photos()));
+        }
+        return items;
+    }
 
     /**
      * 给每条明细填上价目表里的单价 —— 价格只有后端说了算。

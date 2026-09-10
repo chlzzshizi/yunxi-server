@@ -1,6 +1,9 @@
 package com.yunxi.application.service;
 
+import com.yunxi.application.dto.CategoryView;
+import com.yunxi.application.dto.PriceItem;
 import com.yunxi.application.dto.PriceRow;
+import com.yunxi.application.dto.WashTypeView;
 import com.yunxi.common.BusinessException;
 import com.yunxi.common.Result;
 import com.yunxi.domain.price.ClothesCategory;
@@ -42,11 +45,11 @@ public class PriceAppService {
      *      没有普洗 → 允许手填（羽绒服 60.00 就靠这条"逃生舱"）
      *   4. 传单熨：独立定价，直接写
      *
-     * @param categoryId 目标分类（以路径参数为准，忽略明细里自带的 categoryId）
-     * @param prices     要写入的价格（只用到 washTypeId 与 price）
+     * @param categoryId 目标分类（走 URL 路径参数，请求体里没有这个字段）
+     * @param prices     要写入的价格（应用层命令对象，不是领域类型 —— 分层见 §3.1）
      */
     @Transactional
-    public Result<Void> savePrices(Long categoryId, List<ClothesPrice> prices) {
+    public Result<Void> savePrices(Long categoryId, List<PriceItem> prices) {
         if (prices == null || prices.isEmpty()) {
             throw new BusinessException("至少要传一条价格");
         }
@@ -61,15 +64,15 @@ public class PriceAppService {
         //    避免写了一半点才发现有问题（虽然事务能回滚，但能不动手就不动手）
         BigDecimal requestedPlain = null;       // 本次请求里的普洗价
         boolean refinedRequested = false;
-        for (ClothesPrice p : prices) {
-            PricePolicy.requireKnownWashType(p.getWashTypeId());
-            if (p.getPrice() == null || p.getPrice().signum() < 0) {
+        for (PriceItem p : prices) {
+            PricePolicy.requireKnownWashType(p.washTypeId());
+            if (p.price() == null || p.price().signum() < 0) {
                 throw new BusinessException("价格不能为空或负数");
             }
-            if (p.getWashTypeId() == PricePolicy.PLAIN) {
-                requestedPlain = p.getPrice();
+            if (p.washTypeId() == PricePolicy.PLAIN) {
+                requestedPlain = p.price();
             }
-            if (p.getWashTypeId() == PricePolicy.REFINED) {
+            if (p.washTypeId() == PricePolicy.REFINED) {
                 refinedRequested = true;
             }
         }
@@ -89,11 +92,11 @@ public class PriceAppService {
         }
 
         // ── 第二遍：校验全过，落库
-        for (ClothesPrice p : prices) {
-            priceRepository.savePrice(categoryId, p.getWashTypeId(), p.getPrice());
-            if (p.getWashTypeId() == PricePolicy.PLAIN && p.getPrice().signum() > 0) {
+        for (PriceItem p : prices) {
+            priceRepository.savePrice(categoryId, p.washTypeId(), p.price());
+            if (p.washTypeId() == PricePolicy.PLAIN && p.price().signum() > 0) {
                 priceRepository.savePrice(categoryId, PricePolicy.REFINED,
-                        PricePolicy.deriveRefined(p.getPrice()));
+                        PricePolicy.deriveRefined(p.price()));
             }
         }
         return Result.ok(null);
@@ -115,13 +118,15 @@ public class PriceAppService {
     }
 
     /** 全部分类（一级 + 叶子），前端按 parentId 组树 */
-    public Result<List<ClothesCategory>> listCategories() {
-        return Result.ok(priceRepository.findAllCategories());
+    public Result<List<CategoryView>> listCategories() {
+        return Result.ok(priceRepository.findAllCategories()
+                .stream().map(CategoryView::from).toList());
     }
 
     /** 洗涤方式（固定 3 种） */
-    public Result<List<WashType>> listWashTypes() {
-        return Result.ok(priceRepository.findAllWashTypes());
+    public Result<List<WashTypeView>> listWashTypes() {
+        return Result.ok(priceRepository.findAllWashTypes()
+                .stream().map(WashTypeView::from).toList());
     }
 
     /**

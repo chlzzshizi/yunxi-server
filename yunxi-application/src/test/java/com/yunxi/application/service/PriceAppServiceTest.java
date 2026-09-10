@@ -1,5 +1,6 @@
 package com.yunxi.application.service;
 
+import com.yunxi.application.dto.PriceItem;
 import com.yunxi.application.dto.PriceRow;
 import com.yunxi.common.BusinessException;
 import com.yunxi.domain.price.ClothesCategory;
@@ -69,8 +70,14 @@ class PriceAppServiceTest {
         return c;
     }
 
+    /** 仓储里的一条价格（读出来用） */
     private ClothesPrice price(long washTypeId, String value) {
         return new ClothesPrice(SHIRT, washTypeId, new BigDecimal(value));
+    }
+
+    /** 写入请求里的一条价格（应用层命令对象，不带 categoryId —— 它走路径参数） */
+    private PriceItem item(long washTypeId, String value) {
+        return new PriceItem(washTypeId, new BigDecimal(value));
     }
 
     /** 让仓储"该分类已有这些价格" */
@@ -92,7 +99,7 @@ class PriceAppServiceTest {
                     .thenReturn(Optional.of(root(TOPS, "上衣")));
 
             assertThatThrownBy(() -> priceAppService.savePrices(
-                    TOPS, List.of(price(1L, "15.00"))))
+                    TOPS, List.of(item(1L, "15.00"))))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("只能给二级（叶子）分类设置价格");
             verify(priceRepository, never()).savePrice(any(), any(), any());
@@ -104,7 +111,7 @@ class PriceAppServiceTest {
             when(priceRepository.findCategoryById(999L)).thenReturn(Optional.empty());
 
             assertThatThrownBy(() -> priceAppService.savePrices(
-                    999L, List.of(price(1L, "15.00"))))
+                    999L, List.of(item(1L, "15.00"))))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("衣物分类不存在");
         }
@@ -116,7 +123,7 @@ class PriceAppServiceTest {
                     .thenReturn(Optional.of(leaf(SHIRT, "衬衫")));
 
             assertThatThrownBy(() -> priceAppService.savePrices(
-                    SHIRT, List.of(price(4L, "15.00"))))
+                    SHIRT, List.of(item(4L, "15.00"))))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("没有这个洗涤方式");
         }
@@ -128,7 +135,7 @@ class PriceAppServiceTest {
                     .thenReturn(Optional.of(leaf(SHIRT, "衬衫")));
 
             assertThatThrownBy(() -> priceAppService.savePrices(
-                    SHIRT, List.of(price(1L, "-1.00"))))
+                    SHIRT, List.of(item(1L, "-1.00"))))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("不能为空或负数");
         }
@@ -157,7 +164,7 @@ class PriceAppServiceTest {
         @Test
         @DisplayName("改普洗 20 → 精洗被自动重算成 40（不是保留旧值）")
         void deriveOnPlainWrite() {
-            priceAppService.savePrices(SHIRT, List.of(price(1L, "20.00")));
+            priceAppService.savePrices(SHIRT, List.of(item(1L, "20.00")));
 
             verify(priceRepository).savePrice(SHIRT, 1L, new BigDecimal("20.00"));
             verify(priceRepository).savePrice(SHIRT, 2L, new BigDecimal("40.00"));
@@ -166,7 +173,7 @@ class PriceAppServiceTest {
         @Test
         @DisplayName("普洗 0 → 只写普洗，不派生（0 表示不支持）")
         void noDeriveWhenPlainZero() {
-            priceAppService.savePrices(SHIRT, List.of(price(1L, "0.00")));
+            priceAppService.savePrices(SHIRT, List.of(item(1L, "0.00")));
 
             verify(priceRepository).savePrice(SHIRT, 1L, new BigDecimal("0.00"));
             // 普洗这笔本来就要写，所以不能用 never() 断言"一笔都没写"，
@@ -180,7 +187,7 @@ class PriceAppServiceTest {
             existingPrices(price(1L, "15.00"), price(2L, "35.00"));
 
             assertThatThrownBy(() -> priceAppService.savePrices(
-                    SHIRT, List.of(price(2L, "99.00"))))
+                    SHIRT, List.of(item(2L, "99.00"))))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("不能手工设置");
             verify(priceRepository, never()).savePrice(any(), any(), any());
@@ -190,7 +197,7 @@ class PriceAppServiceTest {
         @DisplayName("一次请求里同时传普洗 20 和精洗 99 → 400（以本次普洗为准）")
         void rejectManualRefinedInSameRequest() {
             assertThatThrownBy(() -> priceAppService.savePrices(SHIRT,
-                    List.of(price(1L, "20.00"), price(2L, "99.00"))))
+                    List.of(item(1L, "20.00"), item(2L, "99.00"))))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("不能手工设置");
             // 关键：普洗也不能"写一半"——校验在落库之前全部做完
@@ -202,7 +209,7 @@ class PriceAppServiceTest {
         void allowManualRefinedWithoutPlain() {
             existingPrices(price(1L, "0.00"), price(2L, "60.00"));
 
-            priceAppService.savePrices(SHIRT, List.of(price(2L, "60.00")));
+            priceAppService.savePrices(SHIRT, List.of(item(2L, "60.00")));
 
             verify(priceRepository).savePrice(SHIRT, 2L, new BigDecimal("60.00"));
         }
@@ -210,7 +217,7 @@ class PriceAppServiceTest {
         @Test
         @DisplayName("该分类连普洗行都没有 → 手填精洗同样放行")
         void allowManualRefinedWhenNoPlainRow() {
-            priceAppService.savePrices(SHIRT, List.of(price(2L, "60.00")));
+            priceAppService.savePrices(SHIRT, List.of(item(2L, "60.00")));
 
             verify(priceRepository).savePrice(SHIRT, 2L, new BigDecimal("60.00"));
         }
@@ -220,7 +227,7 @@ class PriceAppServiceTest {
         void ironIsIndependent() {
             existingPrices(price(1L, "15.00"), price(2L, "35.00"));
 
-            priceAppService.savePrices(SHIRT, List.of(price(3L, "8.00")));
+            priceAppService.savePrices(SHIRT, List.of(item(3L, "8.00")));
 
             verify(priceRepository).savePrice(SHIRT, 3L, new BigDecimal("8.00"));
         }

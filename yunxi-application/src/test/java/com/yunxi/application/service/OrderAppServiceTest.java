@@ -1,6 +1,8 @@
 package com.yunxi.application.service;
 
 import com.yunxi.application.dto.OrderExtras;
+import com.yunxi.application.dto.OrderItemCommand;
+import com.yunxi.application.dto.OrderView;
 import com.yunxi.common.BusinessException;
 import com.yunxi.common.PageResult;
 import com.yunxi.common.enums.OrderSource;
@@ -42,10 +44,13 @@ import static org.mockito.Mockito.when;
  *
  * 覆盖三类规则：
  *   1. 谁能操作（顾客 token 不能推进状态 / 支付）
- *   2. 谁能查看（顾客只看自己的；员工只看本店的）
+ *   2. 谁能查看（顾客只看自己的；员工不限门店 —— 所有店长管所有订单，§4.2）
  *   3. 留痕（每次状态操作都记录操作员工）
  *
  * 不依赖 Spring 容器、不连数据库 —— 所以叫"单元"测试。
+ *
+ * 2026-09-11：入参改成应用层命令对象（OrderItemCommand）、出参改成 OrderView，
+ * 明细里的价只能来自价目表 —— 调用方连"传一个价"的字段都没有了。
  */
 class OrderAppServiceTest {
 
@@ -57,9 +62,9 @@ class OrderAppServiceTest {
     private static final Long STORE_A = 1L;
     private static final Long STORE_B = 2L;
 
-    /** 一条明细，单价 15.00 × 2 = 30.00 */
-    private static final List<OrderItem> ITEMS = List.of(
-            new OrderItem(1L, 1L, 2, new BigDecimal("15.00"), null));
+    /** 一条明细：2 件衬衫（价目表里的 15.00/件 → 总价 30.00）。命令对象不带价 */
+    private static final List<OrderItemCommand> ITEMS = List.of(
+            new OrderItemCommand(1L, 1L, 2, null));
 
     @BeforeEach
     void setUp() {
@@ -70,8 +75,7 @@ class OrderAppServiceTest {
         // 不显式打桩的话每个状态操作测试都会撞上 409）
         when(orderRepository.updateStatusCas(any(), any())).thenReturn(true);
         // 后端算价的默认价目表：现有测试的明细都是 (分类1, 洗涤方式1)，
-        // 价目表里这个组合 = 15.00 —— 与 ITEMS 的"单价15.00 × 2 = 总价30.00"对齐，
-        // 所以既有断言一条都不用改
+        // 价目表里这个组合 = 15.00 —— 与 ITEMS 的"2 件 × 15.00 = 总价 30.00"对齐
         when(priceRepository.findPricesByCategoryIds(any())).thenReturn(Map.of(
                 1L, List.of(new ClothesPrice(1L, 1L, new BigDecimal("15.00")))));
     }
@@ -96,8 +100,8 @@ class OrderAppServiceTest {
     @DisplayName("创建订单")
     class CreateOrder {
 
-        private final List<OrderItem> items = List.of(
-                new OrderItem(1L, 1L, 2, new BigDecimal("15.00"), null));
+        private final List<OrderItemCommand> items = List.of(
+                new OrderItemCommand(1L, 1L, 2, null));
 
         @Test
         @DisplayName("门店单必须有操作员工（没有 → 401，且不落库）")
@@ -113,28 +117,28 @@ class OrderAppServiceTest {
         @Test
         @DisplayName("门店单：操作员工与备注一起落库")
         void storeOrderRecordsOperatorAndExtras() {
-            Result<Order> result = orderAppService.createOrder(
+            Result<OrderView> result = orderAppService.createOrder(
                     STORE_A, 100L, OrderSource.STORE, items, 9L,
                     new OrderExtras(LocalDateTime.now(), "3 号楼 502", "袖口有污渍"));
 
             assertThat(result.code()).isEqualTo(200);
-            Order saved = result.data();
-            assertThat(saved.getStaffId()).isEqualTo(9L);
-            assertThat(saved.getDeliveryAddress()).isEqualTo("3 号楼 502");
-            assertThat(saved.getRemark()).isEqualTo("袖口有污渍");
-            assertThat(saved.getStatus()).isEqualTo(OrderStatus.PENDING_PAY);
-            verify(orderRepository).save(saved);
+            OrderView saved = result.data();
+            assertThat(saved.staffId()).isEqualTo(9L);
+            assertThat(saved.deliveryAddress()).isEqualTo("3 号楼 502");
+            assertThat(saved.remark()).isEqualTo("袖口有污渍");
+            assertThat(saved.status()).isEqualTo(OrderStatus.PENDING_PAY);
+            verify(orderRepository).save(any());
         }
 
         @Test
         @DisplayName("网单：没有操作员工也合法（staffId 保持 null）")
         void onlineOrderNeedsNoStaff() {
-            Result<Order> result = orderAppService.createOrder(
+            Result<OrderView> result = orderAppService.createOrder(
                     STORE_A, 100L, OrderSource.ONLINE, items, null, OrderExtras.EMPTY);
 
             assertThat(result.code()).isEqualTo(200);
-            assertThat(result.data().getStaffId()).isNull();
-            assertThat(result.data().getSource()).isEqualTo(OrderSource.ONLINE);
+            assertThat(result.data().staffId()).isNull();
+            assertThat(result.data().source()).isEqualTo(OrderSource.ONLINE);
         }
 
         @Test
@@ -156,19 +160,19 @@ class OrderAppServiceTest {
     class Pricing {
 
         @Test
-        @DisplayName("外部传的单价不作数 —— 被价目表覆盖，总价按库里的价重算")
+        @DisplayName("单价只能来自价目表 —— 调用方连个「传价」的字段都没有")
         void priceComesFromRepositoryNotFromCaller() {
-            // 直接构造带 1.00 的明细：HTTP 层已经没有这个字段了，
-            // 这里要证明的是**服务层**也不信外面给的价
-            List<OrderItem> cheat = List.of(
-                    new OrderItem(1L, 1L, 2, new BigDecimal("1.00"), null));
+            // 命令对象（OrderItemCommand）里没有价格字段，外面想塞也塞不进来；
+            // 这条测试守的是"算出来的价 == 价目表里的价"，也就是算价真的发生了
+            List<OrderItemCommand> twoShirts = List.of(
+                    new OrderItemCommand(1L, 1L, 2, null));
 
-            Result<Order> result = orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.STORE, cheat, 9L, OrderExtras.EMPTY);
+            Result<OrderView> result = orderAppService.createOrder(
+                    STORE_A, 100L, OrderSource.STORE, twoShirts, 9L, OrderExtras.EMPTY);
 
-            assertThat(result.data().getItems().get(0).getUnitPrice())
+            assertThat(result.data().items().get(0).unitPrice())
                     .isEqualByComparingTo("15.00");
-            assertThat(result.data().getTotalAmount()).isEqualByComparingTo("30.00");
+            assertThat(result.data().totalAmount()).isEqualByComparingTo("30.00");
         }
 
         @Test
@@ -178,16 +182,16 @@ class OrderAppServiceTest {
                     1L, List.of(new ClothesPrice(1L, 1L, new BigDecimal("15.00")),
                             new ClothesPrice(1L, 2L, new BigDecimal("35.00")),
                             new ClothesPrice(1L, 3L, new BigDecimal("8.00")))));
-            List<OrderItem> three = List.of(
-                    new OrderItem(1L, 1L, 1, null),
-                    new OrderItem(1L, 2L, 1, null),
-                    new OrderItem(1L, 3L, 1, null));
+            List<OrderItemCommand> three = List.of(
+                    new OrderItemCommand(1L, 1L, 1, null),
+                    new OrderItemCommand(1L, 2L, 1, null),
+                    new OrderItemCommand(1L, 3L, 1, null));
 
-            Result<Order> result = orderAppService.createOrder(
+            Result<OrderView> result = orderAppService.createOrder(
                     STORE_A, 100L, OrderSource.STORE, three, 9L, OrderExtras.EMPTY);
 
             verify(priceRepository, times(1)).findPricesByCategoryIds(any());
-            assertThat(result.data().getTotalAmount()).isEqualByComparingTo("58.00");
+            assertThat(result.data().totalAmount()).isEqualByComparingTo("58.00");
         }
 
         @Test
@@ -215,7 +219,7 @@ class OrderAppServiceTest {
 
             assertThatThrownBy(() -> orderAppService.createOrder(
                     STORE_A, 100L, OrderSource.STORE,
-                    List.of(new OrderItem(13L, 1L, 1, null)), 9L, OrderExtras.EMPTY))
+                    List.of(new OrderItemCommand(13L, 1L, 1, null)), 9L, OrderExtras.EMPTY))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("「羽绒服」不支持「普洗」");
         }
@@ -278,8 +282,8 @@ class OrderAppServiceTest {
             Order order = persistedOrder(1L, STORE_A, 100L);
             stubFind(order);
 
-            Result<Order> result = orderAppService.getOrder(1L, "customer", 100L);
-            assertThat(result.data().getCustomerId()).isEqualTo(100L);
+            Result<OrderView> result = orderAppService.getOrder(1L, "customer", 100L);
+            assertThat(result.data().customerId()).isEqualTo(100L);
         }
 
         @Test
@@ -300,7 +304,7 @@ class OrderAppServiceTest {
             Order order = persistedOrder(1L, STORE_B, 100L);
             stubFind(order);
 
-            Result<Order> result = orderAppService.getOrder(1L, "staff", 9L);
+            Result<OrderView> result = orderAppService.getOrder(1L, "staff", 9L);
             assertThat(result.code()).isEqualTo(200);
         }
     }
@@ -391,7 +395,7 @@ class OrderAppServiceTest {
                     .thenReturn(List.of(persistedOrder(2L, STORE_A, 100L),
                             persistedOrder(1L, STORE_B, 100L)));
 
-            Result<PageResult<Order>> result = orderAppService.listOrders(
+            Result<PageResult<OrderView>> result = orderAppService.listOrders(
                     "staff", 9L, null, 1, 20);
 
             assertThat(result.data().total()).isEqualTo(2L);
@@ -407,7 +411,7 @@ class OrderAppServiceTest {
             when(orderRepository.findPage(null, 100L, null, 0, 20))
                     .thenReturn(List.of(persistedOrder(1L, STORE_A, 100L)));
 
-            Result<PageResult<Order>> result = orderAppService.listOrders(
+            Result<PageResult<OrderView>> result = orderAppService.listOrders(
                     "customer", 100L, null, 1, 20);
 
             assertThat(result.data().list()).hasSize(1);
@@ -420,7 +424,7 @@ class OrderAppServiceTest {
         void pageParamsClamped() {
             when(orderRepository.count(null, null, null)).thenReturn(0L);
 
-            Result<PageResult<Order>> result = orderAppService.listOrders(
+            Result<PageResult<OrderView>> result = orderAppService.listOrders(
                     "staff", 9L, null, 0, 9999);
 
             assertThat(result.data().page()).isEqualTo(1);
@@ -436,7 +440,7 @@ class OrderAppServiceTest {
             when(orderRepository.findPage(null, null, OrderStatus.WASHING, 20, 20))
                     .thenReturn(List.of());
 
-            Result<PageResult<Order>> result = orderAppService.listOrders(
+            Result<PageResult<OrderView>> result = orderAppService.listOrders(
                     "staff", 9L, OrderStatus.WASHING, 2, 20);
 
             assertThat(result.data().total()).isEqualTo(30L);
@@ -467,7 +471,7 @@ class OrderAppServiceTest {
                     .doNothing()
                     .when(orderRepository).save(any());
 
-            Result<Order> result = orderAppService.createOrder(
+            Result<OrderView> result = orderAppService.createOrder(
                     STORE_A, 100L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY);
 
             assertThat(result.code()).isEqualTo(200);

@@ -2,6 +2,7 @@ package com.yunxi.interfaces.security;
 
 
 import com.yunxi.common.BusinessException;
+import com.yunxi.common.enums.StaffRole;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -59,6 +60,43 @@ public class JwtInterceptor implements HandlerInterceptor {
             request.setAttribute("storeId", jwtUtil.getStoreId(token)); // 旧 token 无此 claim 时为 null
         }
 
+        // 5. 角色闸门（管理员能碰哪些 URL）
+        checkRoleGate(request, type, token);
+
         return true;  // 放行
+    }
+
+    /**
+     * 角色闸门 —— 管理员（role=0）不参与日常经营。
+     *
+     * 为什么这条规则住在拦截器、而不是各个 Controller 或应用服务里：
+     *   设计文档 §6.4 是**按 URL 写**的（"`/api/orders/**` 一律 403"、"定价写=店长"），
+     *   所以它本质上是"这个前缀归谁"的路径级策略，和 Spring Security 的
+     *   `antMatchers(...).hasRole(...)` 是同一类东西 —— 一处收口，不会漏。
+     *   若塞进应用服务，就得给 6 个方法各加一个 role 参数，
+     *   规则反而被摊薄成 6 份，将来加一个订单接口就多一个漏点。
+     *
+     * 与"归属校验"（顾客只能看自己的订单）是两回事：
+     *   那种校验跟订单数据有关，仍然留在 OrderAppService 里（那里能单测）。
+     *
+     * 顾客不受这里管：顾客能用哪些接口由各 Controller 自己判断（如抢券、下单）。
+     */
+    private void checkRoleGate(HttpServletRequest request, String type, String token) {
+        if (!"staff".equals(type)) {
+            return;
+        }
+        Integer role = jwtUtil.getRole(token);
+        if (role == null || role != StaffRole.ADMIN.getCode()) {
+            return;   // 店长：订单与定价都是他的本职，全放行
+        }
+        String uri = request.getRequestURI();
+        if (uri.startsWith("/api/orders")) {
+            // 含读接口：管理员连"看一眼订单列表"都不需要，
+            // 放开读只会让"他到底能不能管订单"这个问题重新变模糊
+            throw new BusinessException(403, "管理员不参与订单操作，请使用店长账号");
+        }
+        if ("PUT".equalsIgnoreCase(request.getMethod()) && uri.startsWith("/api/prices")) {
+            throw new BusinessException(403, "管理员不能修改价格，请使用店长账号");
+        }
     }
 }

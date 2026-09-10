@@ -84,7 +84,17 @@ public class Order {
     public void recordOperator(Long staffId) {
         this.staffId = staffId;
     }
-    /** 正常推进 — 根据当前状态和来源自动路由 */
+    /**
+     * 正常推进 — 根据当前状态和来源自动路由（2026-09-11 口径：码值连号 1~7）。
+     *
+     *   1→2→3→4→(分叉)→5(门店待取件)/6(网单派送中)→7 已完成
+     *
+     * 4 之后两条路都得**付清**才允许走到终态 7：
+     * 门店单是"取件即完成"（5→7），网单是"送到即完成"（6→7）。
+     * 原先只有 5→7 校验付清，网单 6→7 是不校验的（那时 7 只是中间态，
+     * 付清校验在后面 7→8 补），连号之后 7 变成终态，这个口子必须堵上，
+     * 否则网单可以一路推进到"已完成"而一分钱没付。
+     */
     public void updateStatus() {
         switch (this.status) {
             case PAID:               // 2 → 3
@@ -100,43 +110,52 @@ public class Order {
                     this.status = OrderStatus.DELIVERING;
                 }
                 break;
-            case PENDING_PICKUP:     // 5 → 8
-                if (this.paidAmount.compareTo(this.totalAmount) < 0) {
-                    throw new BusinessException("未付清，请使用洗后付结账");
-                }
-                this.status = OrderStatus.PICKED_UP;
-                this.finishTime = LocalDateTime.now();
+            case PENDING_PICKUP:     // 5 → 7（门店单终态）
+                requirePaidOff();
+                finish();
                 break;
-            case DELIVERING:         // 6 → 7
-                this.status = OrderStatus.DELIVERED;
-                break;
-            case DELIVERED:          // 7 → 8
-                if (this.paidAmount.compareTo(this.totalAmount) < 0) {
-                    throw new BusinessException("未付清，请使用洗后付结账");
-                }
-                this.status = OrderStatus.PICKED_UP;
-                this.finishTime = LocalDateTime.now();
+            case DELIVERING:         // 6 → 7（网单终态）
+                requirePaidOff();
+                finish();
                 break;
             default:
                 throw new BusinessException("当前状态不允许推进: 状态=" + this.status.getCode());
         }
     }
 
-    /** 洗后付结账 — 状态 5(门店待取件) / 6(网单派送中) / 7(网单已送达) → 8
-     *  修复（2026-09-10）：原实现只允许 5/6。网单洗后付若先推进到 7"已送达"，
-     *  next 会被"未付清"拦、finalPay 又被状态限制拦 —— 订单永久卡死。
-     *  配送是物流事实，不该被付款状态阻断，故补上 7。 */
+    /**
+     * 洗后付结账 — 状态 5(门店待取件) / 6(网单派送中) → 7 已完成。
+     *
+     * 为什么只放这两个状态：它们正是"衣服在店里等着/在路上"的两个点，
+     * 顾客此时掏钱，一次付清直接收尾。1 态该走 pay()，终态 7 已经付过了。
+     *
+     * 历史注：2026-09-10 曾把 7"已送达"也放进来，治的是"网单洗后付
+     * 推进到 7 后 next 被未付清拦、finalPay 又被状态限制拦、订单永久卡死"。
+     * 2026-09-11 把付清校验前移到 6→7 之后，这个卡死情形不复存在，
+     * 7 也不再是需要结账的中间态，于是收回到 5/6。
+     */
     public void finalPay(PayMethod payMethod) {
         if (this.status != OrderStatus.PENDING_PICKUP
-                && this.status != OrderStatus.DELIVERING
-                && this.status != OrderStatus.DELIVERED) {
+                && this.status != OrderStatus.DELIVERING) {
             throw new BusinessException("当前状态不允许洗后付结账: 状态="
                     + this.status.getCode());
         }
         this.paidAmount = this.totalAmount;
         this.finalPayMethod = payMethod;
-        this.status = OrderStatus.PICKED_UP;
+        finish();
+    }
+
+    /** 收尾：两个终态入口（5→7、6→7、finalPay）共用的三件事 */
+    private void finish() {
+        this.status = OrderStatus.COMPLETED;
         this.finishTime = LocalDateTime.now();
+    }
+
+    /** 终态前的最后一道闸：没付清不许"完成" */
+    private void requirePaidOff() {
+        if (this.paidAmount.compareTo(this.totalAmount) < 0) {
+            throw new BusinessException("未付清，请使用洗后付结账");
+        }
     }
     // ────────── 内部工具方法 ──────────
 

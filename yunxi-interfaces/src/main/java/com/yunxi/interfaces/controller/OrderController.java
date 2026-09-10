@@ -1,6 +1,8 @@
 package com.yunxi.interfaces.controller;
 
 import com.yunxi.application.dto.OrderExtras;
+import com.yunxi.application.dto.OrderItemCommand;
+import com.yunxi.application.dto.OrderView;
 import com.yunxi.application.service.OrderAppService;
 import com.yunxi.common.BusinessException;
 import com.yunxi.common.PageResult;
@@ -8,8 +10,6 @@ import com.yunxi.common.Result;
 import com.yunxi.common.enums.OrderSource;
 import com.yunxi.common.enums.OrderStatus;
 import com.yunxi.common.enums.PayMethod;
-import com.yunxi.domain.order.Order;
-import com.yunxi.domain.order.OrderItem;
 import com.yunxi.interfaces.dto.CreateOrderRequest;
 import com.yunxi.interfaces.dto.OrderItemRequest;
 import jakarta.servlet.http.HttpServletRequest;
@@ -24,7 +24,9 @@ import java.util.List;
  * 约定：
  *   - 参数校验放这一层：前端传坏数据要 400（可读），不是 500（NPE）
  *   - 身份与归属只信 token（request attribute），不信请求体
- *   - 真正的授权规则在 OrderAppService（可单元测试），这里只做身份提取
+ *   - **归属授权**（顾客只能看自己的单）在 OrderAppService，可单元测试
+ *   - **角色授权**（管理员一律进不来 /api/orders）在 JwtInterceptor 统一收口，
+ *     走到这里的 staff token 一定是店长
  */
 @RestController
 @RequestMapping("/api/orders")
@@ -38,8 +40,8 @@ public class OrderController {
 
     /** 创建订单 */
     @PostMapping
-    public Result<Order> createOrder(@RequestBody CreateOrderRequest request,
-                                     HttpServletRequest http) {
+    public Result<OrderView> createOrder(@RequestBody CreateOrderRequest request,
+                                         HttpServletRequest http) {
         // ── 参数校验：先拦坏数据，再碰业务 ──
         if (request.source() == null) {
             return Result.fail(400, "缺少订单来源 source");
@@ -84,9 +86,10 @@ public class OrderController {
             }
         }
 
-        // ── DTO → domain（单价留空，由 OrderAppService 查价目表补）──
-        List<OrderItem> items = reqItems.stream()
-                .map(it -> new OrderItem(
+        // ── 接口层 DTO → 应用层命令对象（单价不传，由 OrderAppService 查价目表补）──
+        // 不在这里 new domain 的 OrderItem：接口层引用 domain 就破了分层（§3.1）
+        List<OrderItemCommand> items = reqItems.stream()
+                .map(it -> new OrderItemCommand(
                         it.categoryId(), it.washTypeId(),
                         it.quantity(), it.photos()))
                 .toList();
@@ -103,10 +106,10 @@ public class OrderController {
      * 例：GET /api/orders?status=2&page=1&pageSize=20
      */
     @GetMapping
-    public Result<PageResult<Order>> listOrders(@RequestParam(required = false) Integer status,
-                                                @RequestParam(defaultValue = "1") int page,
-                                                @RequestParam(defaultValue = "20") int pageSize,
-                                                HttpServletRequest http) {
+    public Result<PageResult<OrderView>> listOrders(@RequestParam(required = false) Integer status,
+                                                    @RequestParam(defaultValue = "1") int page,
+                                                    @RequestParam(defaultValue = "20") int pageSize,
+                                                    HttpServletRequest http) {
         String type = (String) http.getAttribute("type");
         boolean isStaff = "staff".equals(type);
         Long requesterId = isStaff
@@ -119,7 +122,7 @@ public class OrderController {
 
     /** 查询订单（带归属校验：顾客只能看自己的、员工不限门店） */
     @GetMapping("/{id}")
-    public Result<Order> getOrder(@PathVariable Long id, HttpServletRequest http) {
+    public Result<OrderView> getOrder(@PathVariable Long id, HttpServletRequest http) {
         String type = (String) http.getAttribute("type");
         boolean isStaff = "staff".equals(type);
         Long requesterId = isStaff
@@ -171,21 +174,18 @@ public class OrderController {
      * 所有店长都能管理所有门店的订单（设计文档 §4.2），所以拿不到 storeId
      * 也不再意味着"越权"，而是"这单不知道算哪个店"。
      *
-     * storeId 为 null 有**两种**完全不同的原因，不能糊成一句"请重新登录"：
-     *   - 管理员（role=0）：staff.store_id 按设计就是 NULL（不隶属门店），
-     *     他重登一百次还是 null —— 订单要有"物理的店"（取件地址落在哪家店），
-     *     所以该说清楚"建门店单请用店长账号"
-     *   - 店长（role=1）：店长必有门店，拿不到只可能是旧 token 缺 storeId claim，
-     *     这才是"重新登录就能解决"的情况
+     * 谁还可能走到"拿不到 storeId"这一支：只剩**旧 token**（签发时没有 storeId claim）。
+     * 管理员曾在这里被单独提示"请用店长账号"，2026-09-11 权限收回后，
+     * 管理员在 JwtInterceptor 的角色闸门就被 403 拦在 /api/orders 之外了，
+     * 根本进不到这个方法 —— 所以那条分支已经删掉，别再加回来。
+     *
+     * 订单要有"物理的店"（取件地址落在哪家店），所以这一支不能让：
+     * 没有店就不知道这单算谁的，只能说清楚让用户重新登录拿新 token。
      */
     private Long requireStaffStore(HttpServletRequest http) {
         Long storeId = (Long) http.getAttribute("storeId");
         if (storeId != null) {
             return storeId;
-        }
-        Integer role = (Integer) http.getAttribute("role");
-        if (role != null && role == 0) {
-            throw new BusinessException(403, "管理员账号不隶属门店，建门店单请使用店长账号");
         }
         throw new BusinessException(401, "登录信息已升级，请重新登录");
     }

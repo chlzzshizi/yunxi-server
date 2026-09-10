@@ -18,9 +18,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 订单状态机单元测试 —— 纯领域测试，不依赖 Spring / 数据库。
  *
  * 覆盖：
- *   1. 三条合法全路径（门店单先付 / 网单先付 / 两种洗后付）
+ *   1. 四条合法全路径（门店单先付 / 网单先付 / 两种洗后付）
  *   2. 非法流转（未支付推进、终态推进、未付清走终态、重复支付）
- *   3. 已知缺陷复现：网单洗后付在状态 7 卡死（见 §"缺陷复现"）
+ *
+ * 2026-09-11 口径：码值连号 1~7，7 是通用终态，
+ * 门店单 1→2→3→4→5→7、网单 1→2→3→4→6→7，两条路**都**要付清才能到 7。
  */
 class OrderTest {
 
@@ -40,7 +42,7 @@ class OrderTest {
     class HappyPath {
 
         @Test
-        @DisplayName("门店单·先付：1→2→3→4→5→8，全程 4 次推进，终态记录完成时间")
+        @DisplayName("门店单·先付：1→2→3→4→5→7，全程 4 次推进，终态记录完成时间")
         void storeOrderPrepaid() {
             Order order = newOrder(OrderSource.STORE);
             assertThat(order.getStatus()).isEqualTo(OrderStatus.PENDING_PAY);
@@ -55,13 +57,13 @@ class OrderTest {
             order.updateStatus();                       // 4 → 5（门店单分叉走 5）
             assertThat(order.getStatus()).isEqualTo(OrderStatus.PENDING_PICKUP);
 
-            order.updateStatus();                       // 5 → 8（已付清，放行）
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.PICKED_UP);
+            order.updateStatus();                       // 5 → 7（已付清，放行）
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.COMPLETED);
             assertThat(order.getFinishTime()).isNotNull();
         }
 
         @Test
-        @DisplayName("网单·先付：1→2→3→4→6→7→8，7 态是网单独有中间态")
+        @DisplayName("网单·先付：1→2→3→4→6→7，两条路在 7 汇合成同一个终态")
         void onlineOrderPrepaid() {
             Order order = newOrder(OrderSource.ONLINE);
             order.pay(PayMethod.WECHAT, TOTAL);         // 1 → 2
@@ -70,12 +72,8 @@ class OrderTest {
             order.updateStatus();                       // 4 → 6（网单分叉走 6）
             assertThat(order.getStatus()).isEqualTo(OrderStatus.DELIVERING);
 
-            order.updateStatus();                       // 6 → 7
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.DELIVERED);
-            assertThat(order.getFinishTime()).isNull(); // 中间态不算完成
-
-            order.updateStatus();                       // 7 → 8
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.PICKED_UP);
+            order.updateStatus();                       // 6 → 7（已付清，放行）
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.COMPLETED);
             assertThat(order.getFinishTime()).isNotNull();
         }
 
@@ -91,10 +89,11 @@ class OrderTest {
             order.updateStatus();                       // 4 → 6
             assertThat(order.getStatus()).isEqualTo(OrderStatus.DELIVERING);
 
-            order.finalPay(PayMethod.ALIPAY);           // 6 → 8
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.PICKED_UP);
+            order.finalPay(PayMethod.ALIPAY);           // 6 → 7
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.COMPLETED);
             assertThat(order.getPaidAmount()).isEqualByComparingTo(TOTAL);
             assertThat(order.getFinalPayMethod()).isEqualTo(PayMethod.ALIPAY);
+            assertThat(order.getFinishTime()).isNotNull();
         }
 
         @Test
@@ -106,8 +105,8 @@ class OrderTest {
             order.updateStatus();                       // 3 → 4
             order.updateStatus();                       // 4 → 5
 
-            order.finalPay(PayMethod.CASH);             // 5 → 8
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.PICKED_UP);
+            order.finalPay(PayMethod.CASH);             // 5 → 7
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.COMPLETED);
             assertThat(order.getPaidAmount()).isEqualByComparingTo(TOTAL);
         }
     }
@@ -138,21 +137,22 @@ class OrderTest {
         }
 
         @Test
-        @DisplayName("终态不可逆（8 态点 next）")
+        @DisplayName("终态不可逆（7 态点 next）")
         void terminalIsFinal() {
             Order order = newOrder(OrderSource.STORE);
             order.pay(PayMethod.CASH, TOTAL);
             order.updateStatus();
             order.updateStatus();
             order.updateStatus();
-            order.updateStatus();                       // 到 8
+            order.updateStatus();                       // 到 7
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.COMPLETED);
             assertThatThrownBy(order::updateStatus)
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("不允许推进");
         }
 
         @Test
-        @DisplayName("门店单未结账不能走终端态（5→8 被拦）")
+        @DisplayName("门店单未结账不能走终端态（5→7 被拦）")
         void cannotFinishUnpaidStoreOrder() {
             Order order = newOrder(OrderSource.STORE);
             order.pay(PayMethod.BALANCE, BigDecimal.ZERO);  // 洗后付
@@ -165,22 +165,24 @@ class OrderTest {
         }
 
         @Test
-        @DisplayName("网单未结账不能走终端态（7→8 被拦）")
+        @DisplayName("网单未结账不能走终端态（6→7 被拦——补上的那个口子）")
         void cannotFinishUnpaidOnlineOrder() {
             Order order = newOrder(OrderSource.ONLINE);
             order.pay(PayMethod.BALANCE, BigDecimal.ZERO);
             order.updateStatus();                       // → 3
             order.updateStatus();                       // → 4
             order.updateStatus();                       // → 6
-            order.updateStatus();                       // → 7
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.DELIVERING);
+            // 6→7 现在也要付清：旧口径下 7 是中间态、校验在 7→8，
+            // 网单可以一路"已完成"而一分钱没付
             assertThatThrownBy(order::updateStatus)
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("未付清");
         }
 
         @Test
-        @DisplayName("finalPay 只在 5/6/7 态放行（1 态、终态直接结账被拦）")
-        void finalPayOnlyAtStatus5To7() {
+        @DisplayName("finalPay 只在 5/6 态放行（1 态、终态直接结账被拦）")
+        void finalPayOnlyAtStatus5And6() {
             Order order = newOrder(OrderSource.STORE);
             assertThatThrownBy(() -> order.finalPay(PayMethod.CASH))
                     .isInstanceOf(BusinessException.class)
@@ -191,7 +193,7 @@ class OrderTest {
             order.updateStatus();
             order.updateStatus();
             order.updateStatus();
-            order.updateStatus();                       // → 8
+            order.updateStatus();                       // → 7
             assertThatThrownBy(() -> order.finalPay(PayMethod.CASH))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("不允许洗后付结账");
@@ -256,28 +258,23 @@ class OrderTest {
     // ════════════════ 缺陷回归 ════════════════
 
     @Nested
-    @DisplayName("缺陷回归：网单洗后付在状态 7 可结账（2026-09-10 修复）")
-    class DeadlockRegression {
+    @DisplayName("缺陷回归：网单洗后付不再有卡死路径（原缺陷 2026-09-10，2026-09-11 连号后结构性消失）")
+    class NoDeadlockRegression {
 
         @Test
-        @DisplayName("先推进到 7 再 finalPay：应成功 7→8 并补齐款项（原缺陷：永久卡死）")
-        void onlinePostpaidCanSettleAtDelivered() {
+        @DisplayName("网单洗后付：6 态结账 6→7，一次走完不留中间态")
+        void onlinePostpaidSettlesAtDelivering() {
             Order order = newOrder(OrderSource.ONLINE);
             order.pay(PayMethod.BALANCE, BigDecimal.ZERO);  // 洗后付
             order.updateStatus();                       // 2 → 3
             order.updateStatus();                       // 3 → 4
             order.updateStatus();                       // 4 → 6
-            order.updateStatus();                       // 6 → 7（先推进到"已送达"）
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.DELIVERED);
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.DELIVERING);
 
-            // 正常推进仍被未付清拦截（这一条不能松）
-            assertThatThrownBy(order::updateStatus)
-                    .isInstanceOf(BusinessException.class)
-                    .hasMessageContaining("未付清");
-
-            // 修复点：7 态结账放行，订单能走到终点
-            order.finalPay(PayMethod.CASH);             // 7 → 8
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.PICKED_UP);
+            // 原缺陷是"先 next 到 7、再靠 finalPay 解锁"，那个中间态已经没了：
+            // 6→7 本身就要付清，所以订单不可能带着欠款停在终态
+            order.finalPay(PayMethod.CASH);             // 6 → 7
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.COMPLETED);
             assertThat(order.getPaidAmount()).isEqualByComparingTo(TOTAL);
             assertThat(order.getFinishTime()).isNotNull();
         }
