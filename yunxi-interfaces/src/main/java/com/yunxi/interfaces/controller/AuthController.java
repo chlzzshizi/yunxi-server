@@ -1,12 +1,11 @@
 package com.yunxi.interfaces.controller;
 
 
+import com.yunxi.application.dto.StaffIdentity;
+import com.yunxi.application.service.StaffAuthAppService;
 import com.yunxi.common.Result;
-import com.yunxi.infrastructure.persistence.mapper.StaffMapper;
-import com.yunxi.infrastructure.persistence.po.StaffPO;
 import com.yunxi.interfaces.security.JwtUtil;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
@@ -14,21 +13,23 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 认证接口 —— 员工登录/登出。
+ *
+ * 这一层现在只做两件事：把请求体拆成参数、把身份签成 token。
+ * "能不能登录"的规则在 StaffAuthAppService，"怎么查库"在 StaffRepositoryImpl ——
+ * 它不再 import 任何 infrastructure 的东西。
  */
 @RestController
 @RequestMapping("/api/auth/staff")
 public class AuthController {
 
-    private final StaffMapper staffMapper;
+    private final StaffAuthAppService staffAuthAppService;
     private final JwtUtil jwtUtil;
-    private final BCryptPasswordEncoder passwordEncoder;
     private final StringRedisTemplate redisTemplate;
 
-    public AuthController(StaffMapper staffMapper, JwtUtil jwtUtil,
+    public AuthController(StaffAuthAppService staffAuthAppService, JwtUtil jwtUtil,
                           StringRedisTemplate redisTemplate) {
-        this.staffMapper = staffMapper;
+        this.staffAuthAppService = staffAuthAppService;
         this.jwtUtil = jwtUtil;
-        this.passwordEncoder = new BCryptPasswordEncoder();
         this.redisTemplate = redisTemplate;
     }
 
@@ -39,27 +40,17 @@ public class AuthController {
      */
     @PostMapping("/login")
     public Result<Map<String, String>> login(@RequestBody Map<String, String> body) {
-        String username = body.get("username");
-        String password = body.get("password");
-
-        // 1. 查用户
-        StaffPO staff = staffMapper.selectByUsername(username);
-        if (staff == null) {
-            return Result.fail(401, "用户名或密码错误");
+        Result<StaffIdentity> auth = staffAuthAppService.login(
+                body.get("username"), body.get("password"));
+        if (auth.code() != 200) {
+            // 失败原因（401 用户名或密码错误 / 403 账号已被停用）原样传给前端
+            return Result.fail(auth.code(), auth.message());
         }
-        // 2. 验证码是否停用
-        if (staff.getStatus() == 0) {
-            return Result.fail(403, "账号已被停用");
-        }
-        // 3. 验证密码
-        if (!passwordEncoder.matches(password, staff.getPassword())) {
-            return Result.fail(401, "用户名或密码错误");
-        }
-        // 4. 生成 Token（带 storeId：门店单归属校验只信 token 不信请求体）
-        String token = jwtUtil.generateToken(staff.getId(), staff.getUsername(),
-                staff.getRole(), staff.getStoreId());
-
-        // 5. 返回
+        // 签 token 留在接口层：JWT 是"这套 HTTP 接口怎么携带身份"的约定，
+        // 跟 Authorization 头同级，不该下沉到应用层去
+        StaffIdentity who = auth.data();
+        String token = jwtUtil.generateToken(who.staffId(), who.username(),
+                who.role(), who.storeId());
         return Result.ok(Map.of("token", token));
     }
 

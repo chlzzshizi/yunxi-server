@@ -36,6 +36,14 @@
             <groupId>org.springframework</groupId>
             <artifactId>spring-tx</artifactId>
         </dependency>
+        <!-- 显式声明 spring-security-crypto：两个 AuthAppService 直接用到
+             BCryptPasswordEncoder。这块代码原先在 controller 里，依赖挂在
+             yunxi-interfaces 上；搬进应用层后就得由应用层自己声明，
+             不能再顺着 yunxi-infrastructure 的传递依赖拿 -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.mapstruct</groupId>
             <artifactId>mapstruct</artifactId>
