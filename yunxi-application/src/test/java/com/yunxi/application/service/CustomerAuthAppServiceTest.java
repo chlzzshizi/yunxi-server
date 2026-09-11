@@ -198,5 +198,29 @@ class CustomerAuthAppServiceTest {
             assertThat(r.code()).isEqualTo(401);
             assertThat(r.message()).isEqualTo("该手机号未设置密码，请先注册");
         }
+
+        @Test
+        @DisplayName("密码字段缺失/空白 → 401，不是 400（Bug 23）")
+        void blankPasswordIsLoginFailureNotParamError() {
+            existing(customer("13800138000", HASH));
+
+            for (String blank : new String[]{null, "", "   "}) {
+                assertThat(customerAuthAppService.login("13800138000", blank))
+                        .extracting(Result::code, Result::message)
+                        .containsExactly(401, "手机号或密码错误");
+            }
+        }
+
+        @Test
+        @DisplayName("门店单顾客 + 没带密码 → 仍回「未设置密码，请先注册」这条更管用的提示")
+        void blankPasswordKeepsWalkInHint() {
+            existing(customer("13700000002", null));
+
+            assertThat(customerAuthAppService.login("13700000002", null))
+                    .extracting(Result::code, Result::message)
+                    .containsExactly(401, "该手机号未设置密码，请先注册");
+            // 守卫放在 hasPassword 之后是有意的：提前拦会把"你去注册一下"换成
+            // "手机号或密码错误"，对门店单顾客来说等于没给任何出路
+        }
     }
 }

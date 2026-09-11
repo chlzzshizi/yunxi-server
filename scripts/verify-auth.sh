@@ -11,6 +11,10 @@
 #   搬家前先立一张网：**当前代码下它必须全绿**（characterization test，钉住现状），
 #   搬完再跑还是绿的，才叫"行为没变"。
 #
+#   2026-09-12：D 段从"探针"升格成断言。当初只是打印看看，结果照出一个真问题——
+#   缺 password 时 BCrypt 的英文原文 "rawPassword cannot be null" 被原样回给前端
+#   （Bug 23）。修完之后这些行为就该被钉死，不再只是"拍张照"。
+#
 # 脏数据：一个停用账号（staff id=98, mgr_disabled）、一个无密码的门店单顾客
 #   （13700000002, WalkIn）。两者都是 insert ignore，可重复跑。
 #   每次运行新注册的顾客会在结尾删掉（见 F 段）。
@@ -146,22 +150,43 @@ check "C5 顾客 token 能过拦截器" \
   "$(curl -s "$BASE/api/orders?page=1&pageSize=1" -H "Authorization: Bearer $CUST_T")" '"code":200'
 
 echo
-echo "########## D. 探针：当前行为记录（不做断言）##########"
-# 这几条现在**没有防御**（body.get 取不到就是 null，直接往下传）。
-# 装修前先把毛坯的样子拍下来——是 400 还是 500，是中文还是英文内部异常，
-# 看清楚了才好决定要不要在整改时顺手补上
-echo "  D1 员工登录缺 password："
-echo "     $(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
-             -d '{"username":"manager"}')"
-echo "  D2 员工登录缺 username："
-echo "     $(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
-             -d '{"password":"admin123"}')"
-echo "  D3 顾客登录缺 password："
-echo "     $(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application/json" \
-             -d "{\"phone\":\"$PHONE_NEW\"}")"
-echo "  D4 顾客注册缺 name："
-echo "     $(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
-             -d "{\"phone\":\"$PHONE_ABSENT\",\"password\":\"123456\"}")"
+echo "########## D. 缺参数：也不许把内部原文漏出去（Bug 23）##########"
+# 这段原来是"探针"（只打印、不断言）。当时三个缺 password 的请求全回：
+#   {"code":400,"message":"rawPassword cannot be null"}
+# —— BCryptPasswordEncoder.matches(null,..) 抛的英文原文被全局处理器原样透传。
+#
+# 修完之后的规矩：**用户看得到的 message 里不许有英文**。框架异常的消息都是英文、
+# 写给开发者的，这就是它的指纹；业务失败一律回中文那句。所以每条都验两件事：
+# 回的是哪个码哪句话，以及消息里有没有混进英文。
+
+D1=$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
+       -d '{"username":"manager"}')
+check   "D1 员工登录缺 password → 401（不是 400「参数不正确」）" "$D1" '"code":401'
+check   "D1b 消息与「密码错」逐字相同" "$D1" "用户名或密码错误"
+checkNot "D1c 消息里没有英文原文（rawPassword…）" "$(jqf "$D1" message)" '[A-Za-z]'
+
+# 缺 username 走的是"查库查不到"（SQL `username = NULL` 永不成立），同样是 401 那一句。
+# 这条盯的是：别哪天给 mapper 加个动态 if，把 null 变成"参数错误"
+D2=$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
+       -d '{"password":"admin123"}')
+check   "D2 员工登录缺 username → 401 同一句" "$D2" "用户名或密码错误"
+checkNot "D2b 消息里没有英文" "$(jqf "$D2" message)" '[A-Za-z]'
+
+D3=$(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application/json" \
+       -d "{\"phone\":\"$PHONE_NEW\"}")
+check   "D3 顾客登录缺 password → 401 手机号或密码错误" "$D3" "手机号或密码错误"
+checkNot "D3b 消息里没有英文" "$(jqf "$D3" message)" '[A-Za-z]'
+
+# 守卫放在 hasPassword 之后：门店单顾客没带密码时，该看到的仍是"去注册"，
+# 而不是通用那句 —— 提前拦等于把唯一的出路藏起来
+D4=$(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application/json" \
+       -d "{\"phone\":\"$PHONE_NOPWD\"}")
+check "D4 门店单顾客 + 没带密码 → 仍回「未设置密码，请先注册」" "$D4" "该手机号未设置密码，请先注册"
+
+D5=$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
+       -d "{\"phone\":\"$PHONE_ABSENT\",\"password\":\"123456\"}")
+check   "D5 顾客注册缺 name → 400 姓名、手机号、密码不能为空" "$D5" "姓名、手机号、密码不能为空"
+checkNot "D5b 消息里没有英文" "$(jqf "$D5" message)" '[A-Za-z]'
 
 echo
 echo "########## F. 收尾：清掉本次注册的顾客 ##########"

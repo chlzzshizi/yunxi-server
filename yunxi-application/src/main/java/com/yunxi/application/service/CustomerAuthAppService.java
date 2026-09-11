@@ -70,6 +70,13 @@ public class CustomerAuthAppService {
         if (!customer.hasPassword()) {
             return Result.fail(401, "该手机号未设置密码，请先注册");
         }
+        // 顾客存的哈希有了，但请求里可能压根没带密码 —— matches(null, ..) 抛
+        // IllegalArgumentException，会被全局处理器当成"参数不合法"回 400，
+        // 而不是"登录失败"。放在这一行之前，紧挨着真正需要它的那次调用。
+        // 注意别把这句提到 hasPassword 之前：门店单顾客该看到的是"请先注册"，不是"密码错误"。
+        if (password == null || password.isBlank()) {
+            return Result.fail(401, "手机号或密码错误");
+        }
         if (!passwordEncoder.matches(password, customer.getPasswordHash())) {
             return Result.fail(401, "手机号或密码错误");
         }

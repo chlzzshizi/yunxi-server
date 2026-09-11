@@ -48,6 +48,13 @@ public class StaffAuthAppService {
         if (!staff.canLogin()) {
             return Result.fail(403, "账号已被停用");
         }
+        // 密码字段缺失/空白时不能交给 BCrypt：matches(null, ..) 抛的是
+        // IllegalArgumentException，会被全局处理器当成"参数不合法"回 400 ——
+        // 那等于用响应码告诉对方"这次请求没带密码"，而这里该说的是"密码不对"。
+        // 消息与密码错**逐字相同**，连"有没有传这个字段"都不该被分辨出来。
+        if (password == null || password.isBlank()) {
+            return Result.fail(401, "用户名或密码错误");
+        }
         if (!passwordEncoder.matches(password, staff.getPasswordHash())) {
             return Result.fail(401, "用户名或密码错误");
         }

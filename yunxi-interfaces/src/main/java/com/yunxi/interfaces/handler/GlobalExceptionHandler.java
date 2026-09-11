@@ -26,11 +26,20 @@ public class GlobalExceptionHandler {
         return Result.fail(e.getCode(), e.getMessage());
     }
 
-    /** 参数校验失败（后续加了 @Valid 注解后会触发） */
+    /**
+     * 参数不合法 → 400。
+     *
+     * **刻意不回显 e.getMessage()**（2026-09-12，Bug 23）。
+     * 这条通道接的是 JDK / Spring 自己的异常，消息是英文技术细节、写给开发者的：
+     * 比如 BCryptPasswordEncoder.matches(null, ..) 抛的 "rawPassword cannot be null"，
+     * 原样回显等于把"我们用的什么密码库、内部怎么报错"讲给前端听。
+     * 项目自己的业务消息一律走 BusinessException（理由见 OrderStatus.fromCode 的注释），
+     * 那条通道才是"要讲给用户听的话"。原文只进日志：日志是给自己排查用的，不怕技术细节。
+     */
     @ExceptionHandler(IllegalArgumentException.class)
     public Result<Void> handleIllegalArgument(IllegalArgumentException e) {
         log.warn("参数错误: {}", e.getMessage());
-        return Result.fail(400, e.getMessage());
+        return Result.fail(400, "参数不正确");
     }
 
     /** 缺少必填请求参数（如 pay 少了 amount）→ 400，而不是 500 */

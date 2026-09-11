@@ -1043,6 +1043,97 @@ fi
 
 ---
 
+## Bug 23：BCrypt 的英文原文被原样回给前端——`rawPassword cannot be null`
+
+> 类型说明：**两个独立成因叠在一起**。只修任何一个，现象都会消失，但都只是消失了一半
+> （详见「修复」里那句话）。发现它纯属意外：是 Bug 22 那次整改顺手挂的探针照出来的。
+
+### 现象
+
+2026-09-11 给认证模块写验收网（`verify-auth.sh`）时，末尾挂了几条"探针"——
+只打印、不断言，目的是"装修前先看清楚毛坯长什么样"。当时照出来的是：
+
+```
+D1 员工登录缺 password：
+   {"code":400,"message":"rawPassword cannot be null","data":null}
+D3 顾客登录缺 password：
+   {"code":400,"message":"rawPassword cannot be null","data":null}
+```
+
+一个全中文的系统里蹦出一句英文，而且这句话交代得很清楚：**我们用的哪个密码库、
+它内部哪个参数是 null**。攻击者不用猜，服务端自己招了。
+
+这条当时**原样留着没改**（改动会污染"纯搬家"的验证），记在提交信息里作为遗留。
+
+### 根因
+
+两层，缺一不可：
+
+1. **处理器回显了框架异常的原文** —— `GlobalExceptionHandler`：
+   ```java
+   @ExceptionHandler(IllegalArgumentException.class)
+   public Result<Void> handleIllegalArgument(IllegalArgumentException e) {
+       return Result.fail(400, e.getMessage());   // ← 原文出网
+   }
+   ```
+2. **业务消息也搭这条管道** —— 4 个枚举的 `fromCode` 都拿 `IllegalArgumentException`
+   当"给用户看的话"的载体（`"没有这个状态: 99"`）。
+   所以第 1 条**不能**直接改成泛化消息：一改，`verify-orders.sh` 里那 3 条
+   断言（没有这个状态 / 来源 / 洗涤方式）全红。
+
+`IllegalArgumentException` 是 **JDK 的公共类型**，Spring 内部在抛、BCrypt 也在抛。
+处理器拿到它，**没有任何办法区分**"这句是我们要讲给用户听的话"和"这句是框架的内部报错"。
+于是 BCrypt 那句框架异常，就顺着"给用户看的话"这条管道出网了。
+
+> 换个说法：**不是处理器写错了，是把两种消息塞进了同一根管子**。
+> 管道本身没坏，坏在谁都能往里灌。
+
+### 修复
+
+三步，**每一步都只解决一半问题**：
+
+1. **枚举改抛 `BusinessException`**（`OrderStatus` / `OrderSource` / `PayMethod` / `StaffRole`）——
+   把业务消息从公共类型上挪走。消息**一个字不改**，`verify-orders.sh` 那 3 条断言照旧通过：
+   改的是类型，不是文案。改完这根管道里只剩框架噪音，才敢动第 2 步
+2. **处理器不再回显原文**：
+   ```java
+   log.warn("参数错误: {}", e.getMessage());   // 原文进日志：日志是给自己排查用的
+   return Result.fail(400, "参数不正确");       // 出网的只有泛化消息
+   ```
+3. **登录服务补空白守卫**（`StaffAuthAppService` / `CustomerAuthAppService`）：
+   ```java
+   if (password == null || password.isBlank()) {
+       return Result.fail(401, "用户名或密码错误");
+   }
+   ```
+   为什么是 401 而不是 400：**400 同样是泄漏**——它等于用响应码承认"这次请求没带密码字段"。
+   401 加上和"密码错"逐字相同的消息，连"传没传这个字段"都分辨不出来。
+
+> **只修第 1 步**：业务消息活了，`rawPassword` 照样泄漏（管道还通着）。
+> **只修第 2 步**：泄漏堵住了，但 3 条业务断言全红（管道没了，业务消息也出不去）。
+> 这类 bug 值钱就值钱在这——修一半，现场看起来完全正常。
+
+### 加固
+
+- 新增 `GlobalExceptionHandlerTest`（interfaces 层第一个单测，纯函数，`new` 一个就能测）：
+  钉住"框架异常不回显 + 业务异常原样透传"这两条**相反**的规矩
+- `verify-auth.sh` 的 D 段从"探针"**升格为断言**（4 条 → 10 条）：每条都验两件事——
+  回的是哪个中文码/话，以及 `message` 里**有没有英文字母**（框架异常的指纹）
+- 单测 82 → 88（新增 3 条 handler + 3 条空白密码）
+
+### 教训
+
+- **"要给用户看的消息"必须有自己的异常类型**：一旦和框架共用，就等于把自己要说的话
+  和框架的内部噪音混进同一根管子，等框架往里塞一句英文，你连"该不该转发"都判断不了
+- **探针不是浪费**：那 4 条 D 段当初只是"拍张照"，照出来的东西反而是那轮最值钱的产出。
+  **没有断言的地方也有信息，前提是你肯看一眼**
+- **注释里的理由要能指导下一步**：`OrderStatus.fromCode` 上早就写着"抛 BusinessException 而不是
+  IllegalArgumentException"，但另外 3 个枚举没跟上——**一个地方想明白了，不等于四个地方都改对了**
+- **修完把"当时为什么这么写"钉进测试**：`GlobalExceptionHandlerTest` 里那句
+  `doesNotContain("rawPassword")` 才是这条 bug 的墓碑，光断言"等于参数不正确"挡不住下次
+
+---
+
 ## 汇总
 
 | Bug | 层 | 类型 | 一句话 |
@@ -1069,6 +1160,7 @@ fi
 | 20 | Interfaces | 错误信息误导 | 管理员 storeId 为 NULL（设计如此）被当成"旧 token 需重登"，403 报成了 401 |
 | 21 | 验收 | 脚本失效未重跑 | 后端算价后 `verify-orders.sh` 就红了（分类 id 还是 V6 之前的父分类、unitPrice 已作废），到口径修订才被发现 |
 | 22 | 验收 | 脚本失效**被误诊** | Bug 21 的漏网之鱼：`verify-race.sh` 同样用父分类建单，但报出来的是"CAS 失灵"（两个 404 被读成并发失败），把排查方向指反 |
+| 23 | Interfaces + Common | 信息泄漏 | 业务消息借 JDK 公共异常类型 + 处理器回显原文：BCrypt 的 `rawPassword cannot be null` 直接回给前端（**两个成因，修一半就正常，所以难发现**） |
 
 ---
 

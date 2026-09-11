@@ -108,6 +108,22 @@ class StaffAuthAppServiceTest {
             // 逐字相同才叫不可枚举；只要差一个字，就等于承认"这个用户名是存在的"
             assertThat(r.message()).isEqualTo("用户名或密码错误");
         }
+
+        @Test
+        @DisplayName("密码字段缺失/空白 → 也是 401 那句话，不是 400（Bug 23）")
+        void blankPasswordIsAWrongCredentialNotAParamError() {
+            existing(staff("manager", 1));
+
+            // 拿真的 BCrypt 跑，所以这条测试同时是"没把 null 递给编码器"的证明：
+            // 守卫一旦被删掉，matches(null, ..) 会当场抛 IllegalArgumentException
+            for (String blank : new String[]{null, "", "   "}) {
+                assertThat(staffAuthAppService.login("manager", blank))
+                        .extracting(Result::code, Result::message)
+                        .containsExactly(401, "用户名或密码错误");
+            }
+            // 为什么不能是 400：400 等于用响应码承认"这次请求没带密码"，
+            // 而 401 与"密码错"分不出来 —— 连"传没传这个字段"都不该被对方知道
+        }
     }
 
     // ════════════════ 账号状态 ════════════════

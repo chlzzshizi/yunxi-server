@@ -62,7 +62,7 @@ public class OrderController {
             // 这里**不再校验单价**：价格由后端算（OrderAppService.priceItems）。
             // 请求体里根本没有这个字段了，前端传了也会被 Spring 忽略。
         }
-        // 枚举转换失败会抛 IllegalArgumentException，由 GlobalExceptionHandler 统一转 400
+        // 枚举转换失败会抛 BusinessException，由 GlobalExceptionHandler 统一转 400
         OrderSource source = OrderSource.fromCode(request.source());
 
         // ── 身份与归属：只信 token ──
@@ -115,7 +115,7 @@ public class OrderController {
         Long requesterId = isStaff
                 ? (Long) http.getAttribute("staffId")
                 : (Long) http.getAttribute("customerId");
-        // 非法的状态码（如 status=99）会抛 IllegalArgumentException → 全局处理器转 400
+        // 非法的状态码（如 status=99）会抛 BusinessException → 全局处理器转 400
         OrderStatus filter = status == null ? null : OrderStatus.fromCode(status);
         return orderAppService.listOrders(type, requesterId, filter, page, pageSize);
     }

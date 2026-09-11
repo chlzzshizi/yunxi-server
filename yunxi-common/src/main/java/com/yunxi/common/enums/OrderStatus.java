@@ -1,5 +1,7 @@
 package com.yunxi.common.enums;
 
+import com.yunxi.common.BusinessException;
+
 /**
  * 订单状态 —— 码值连号 1~7（2026-09-11 口径）。
  *
@@ -31,16 +33,23 @@ public enum OrderStatus {
     }
     /**
      * 数字码 → 枚举。
-     * 注意抛的是 IllegalArgumentException（Exception 的子类），
-     * 不是 IllegalAccessError（Error 的子类，GlobalExceptionHandler 的
-     * @ExceptionHandler(Exception.class) 接不住，会漏成非 JSON 的 500）。
-     * 与 OrderSource.fromCode / PayMethod.fromCode 保持一致。
+     *
+     * 抛 BusinessException（项目自己的业务异常），**不是 IllegalArgumentException**。
+     * 后者是 JDK 的公共类型，Spring 内部也在用，GlobalExceptionHandler 分不清
+     * 哪条消息是"我们要讲给用户听的话"、哪条是"框架的内部报错"。
+     * 2026-09-12 踩过：BCryptPasswordEncoder.matches(null, ..) 抛的
+     * IllegalArgumentException 带着英文原文 "rawPassword cannot be null" 直接漏给前端。
+     * 既然那条通道是给我们自己的消息用的，就不该借用公共类型。
+     *
+     * BusinessException 是 Exception 的子类（不是 IllegalAccessError 那种 Error），
+     * GlobalExceptionHandler 接得住，返回体仍是 JSON。
+     * 与 OrderSource.fromCode / PayMethod.fromCode / StaffRole.fromCode 保持一致。
      */
     public static OrderStatus fromCode(int code){
         for(OrderStatus s : values()){
             if(s.code == code)return s;
         }
-        throw new IllegalArgumentException("没有这个状态:"+code);
+        throw new BusinessException("没有这个状态: " + code);
     }
     public int getCode() {return code;}
     public String getName(){return name;}

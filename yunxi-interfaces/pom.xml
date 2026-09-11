@@ -33,6 +33,14 @@
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
         </dependency>
+        <!-- 本模块的第一个测试（GlobalExceptionHandlerTest）。此前 interfaces 层
+             零测试，是因为它的活儿都在"接请求、转 DTO、签 token"上，验它得靠打接口；
+             GlobalExceptionHandler 例外 —— 它是个纯函数，new 一个就能测 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
