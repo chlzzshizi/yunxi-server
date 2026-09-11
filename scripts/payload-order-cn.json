@@ -1,0 +1,9 @@
+{
+  "source": 1,
+  "customerId": __CID__,
+  "remark": "袖口有污渍，请重点处理",
+  "deliveryAddress": "杭州市西湖区文一西路 100 号 3 幢 502",
+  "items": [
+    { "categoryId": 11, "washTypeId": 1, "quantity": 2, "unitPrice": 15.00 }
+  ]
+}

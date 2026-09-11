@@ -1,0 +1,8 @@
+# shell 脚本一律 LF。
+#
+# 本机 core.autocrlf=true，没有这条的话：仓库里存的是 LF，但每次 checkout
+# 到工作区都会变成 CRLF。CRLF 的脚本在 Git Bash 里跑会报
+#   $'\r': command not found
+# ——报错信息里完全看不出是换行符的问题，只会让人去怀疑脚本逻辑。
+# 这跟本项目 Bug 21/22 是同一类毛病：一个不会自己喊疼的坑。
+*.sh text eol=lf
