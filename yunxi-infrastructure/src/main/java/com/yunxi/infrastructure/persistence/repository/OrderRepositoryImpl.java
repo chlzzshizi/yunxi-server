@@ -109,6 +109,8 @@ public class OrderRepositoryImpl implements OrderRepository {
         po.setSource(order.getSource().getCode());        // 枚举 → 数字
         po.setStatus(order.getStatus().getCode());         // 枚举 → 数字
         po.setTotalAmount(order.getTotalAmount());
+        po.setDiscountAmount(order.getDiscountAmount());
+        po.setCouponId(order.getCouponId());
         po.setPaidAmount(order.getPaidAmount());
         po.setPayMethod(order.getPayMethod() != null
                 ? order.getPayMethod().getCode() : null);  // 枚举 → 字符串
@@ -148,6 +150,8 @@ public class OrderRepositoryImpl implements OrderRepository {
         order.setSource(OrderSource.fromCode(po.getSource()));    // 数字 → 枚举
         order.setStatus(OrderStatus.fromCode(po.getStatus()));     // 数字 → 枚举
         order.setTotalAmount(po.getTotalAmount());
+        order.setDiscountAmount(po.getDiscountAmount());
+        order.setCouponId(po.getCouponId());
         order.setPaidAmount(po.getPaidAmount());
         order.setPayMethod(po.getPayMethod() != null
                 ? PayMethod.fromCode(po.getPayMethod()) : null);   // 字符串 → 枚举

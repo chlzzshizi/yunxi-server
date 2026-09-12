@@ -1,6 +1,8 @@
 package com.yunxi.application.service;
 
 
+import com.yunxi.application.dto.MyCouponView;
+import com.yunxi.common.BusinessException;
 import com.yunxi.common.Result;
 import com.yunxi.infrastructure.persistence.mapper.CouponGrabMapper;
 import com.yunxi.infrastructure.persistence.mapper.CouponMapper;
@@ -10,6 +12,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -101,5 +104,91 @@ public class CouponAppService {
         }
         redisTemplate.opsForSet().add(grabbedKey, customerId.toString());
         return Result.ok("抢到了！折扣：" + coupon.getDiscount());
+    }
+
+    // ──────────────── 消费（被 OrderAppService 调用）────────────────
+    //
+    // 下面两个方法**抛异常**而不是 return Result.fail —— 和上面几个方法风格不同，
+    // 是有意的：它们跑在 createOrder 的**事务里**，失败必须让事务回滚。
+    // Result.fail 是个普通返回值，抛不出异常也就回滚不了，订单会留在库里。
+    // （同理，整个「券-订单抵扣」都走 BusinessException，见设计文档 §5.8）
+
+    /**
+     * 校验这张券能不能用在这张单上，能用就返回折扣率。
+     *
+     * 这一串检查全是**友好提示**，不是权威判定 —— 真正的权威是
+     * {@link #consume} 里那条 CAS。两次检查之间券可能被别人用掉（TOCTOU），
+     * 那时 CAS 会挡下并回 409。这里做一遍只是为了让绝大多数失败
+     * 得到一句"指对方向"的话，而不是笼统的"被人用过了"。
+     *
+     * @param couponId   券 id（不是抢券记录 id）
+     * @param customerId **这张单的顾客**，不是操作人 —— 券必须属于这张单的顾客
+     */
+    public BigDecimal resolveDiscount(Long couponId, Long customerId) {
+        CouponPO coupon = couponMapper.selectById(couponId);
+        if (coupon == null) {
+            throw new BusinessException("优惠券不存在");
+        }
+        // 「没抢到」和「是别人的券」查的是同一件事：有没有这一行。
+        // 对用户来说结果也一样 —— 反正不是他的，所以共用一句话。
+        // （门店单的 customerId 是员工填的，所以这句话也拦不住冒用，
+        //   它买到的是**让错误指对方向**：填错人时立刻说"券不是他的"，
+        //   而不是走到 CAS 报一句 409「已被使用」，把人引去查券是不是重复了）
+        CouponGrabPO grab = couponGrabMapper.selectByCouponAndCustomer(couponId, customerId);
+        if (grab == null) {
+            throw new BusinessException("该优惠券不属于这位顾客");
+        }
+        if (grab.getUsed() != null && grab.getUsed() == 1) {
+            throw new BusinessException("该优惠券已被使用");
+        }
+        // 为什么不用 coupons.status 判断过期：status 由定时任务每分钟推进（§11.10），
+        // 最多滞后一分钟。判"现在能不能用"不能等 cron —— 到点了就该拒。
+        if (coupon.getEndTime() != null && coupon.getEndTime().isBefore(LocalDateTime.now())) {
+            throw new BusinessException("该优惠券已过期");
+        }
+        return coupon.getDiscount();
+    }
+
+    /**
+     * 核销：CAS 置 used=1，并写下使用记录（时间/订单/经手员工）。
+     *
+     * **必须在订单落库成功之后调用**，两个独立的理由：
+     *   ① 订单号冲突的重试循环内部会吞掉异常，先核销会在三次撞号后白白烧掉顾客的券
+     *   ② `used_order_id` 要等订单拿到自增 id 才写得出
+     *
+     * 吃 CAS 的前提是调用方**开着事务**（createOrder 上的 @Transactional）：
+     * 0 行 → 409 → 事务回滚 → 订单不落库，券和订单不会只成一半。
+     *
+     * @param staffId 经手员工。网单是顾客自助，传 null —— 这一列只有门店单才有值，
+     *                它正是"这券是谁烧的"那个问题的答案
+     */
+    public void consume(Long couponId, Long customerId, Long orderId, Long staffId) {
+        int rows = couponGrabMapper.markUsed(couponId, customerId, orderId, staffId);
+        if (rows == 0) {
+            throw new BusinessException(409, "该优惠券已被使用，请刷新后重试");
+        }
+    }
+
+    /**
+     * 我的券（未使用）。过期的也返回，只是打上 expired 标记 —— 前端置灰。
+     *
+     * 用应用时间判过期，和 resolveDiscount 保持一致（两处若用不同的钟，
+     * 会出现"列表里看着没过期、下单却说已过期"的错位）。
+     */
+    public Result<List<MyCouponView>> listMyCoupons(Long customerId) {
+        LocalDateTime now = LocalDateTime.now();
+        List<MyCouponView> list = couponGrabMapper.selectUnusedByCustomer(customerId)
+                .stream()
+                .map(po -> new MyCouponView(
+                        po.getGrabId(),
+                        po.getCouponId(),
+                        po.getName(),
+                        po.getDiscount(),
+                        po.getStartTime(),
+                        po.getEndTime(),
+                        po.getGrabTime(),
+                        po.getEndTime() != null && po.getEndTime().isBefore(now)))
+                .toList();
+        return Result.ok(list);
     }
 }

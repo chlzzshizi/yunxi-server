@@ -29,6 +29,12 @@ checkNot() {  # checkNot "用例名" "响应" "不该出现的片段"
 }
 # 取 JSON 字段（取**第一个**匹配：订单 JSON 里明细也有 id 字段，贪婪匹配会取错）
 jqf() { echo "$1" | grep -o "\"$2\":[^,}]*" | head -1 | cut -d: -f2- | tr -d '"'; }
+# 查库读真相。
+# --default-character-set=utf8mb4 不能删：mysql 命令行默认按 latin1 收发，
+# 读中文整串变 ?????、写中文存成双重编码，而**双重编码在读的时候会抵消回去**
+# —— "列表里不含某个中文"这类断言会因此无条件通过（见 README 的第三个坑）
+db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N \
+       --default-character-set=utf8mb4 -e "$1" 2>/dev/null | tr -d '\r'; }
 
 echo "########## 准备：登录取 token ##########"
 
@@ -64,10 +70,8 @@ echo "  cust1  token: ${CUST1:0:20}..."
 echo "  cust2  token: ${CUST2:0:20}..."
 
 # 顾客 id（从 orders 建单需要 customerId）—— 直接查库拿，避免再调接口
-CUST1_ID=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N --default-character-set=utf8mb4 -e \
-  "select id from customers where phone='13900000001';" 2>/dev/null | tr -d '\r')
-CUST2_ID=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N --default-character-set=utf8mb4 -e \
-  "select id from customers where phone='13900000002';" 2>/dev/null | tr -d '\r')
+CUST1_ID=$(db "select id from customers where phone='13900000001';")
+CUST2_ID=$(db "select id from customers where phone='13900000002';")
 echo "  cust1 id=$CUST1_ID  cust2 id=$CUST2_ID"
 
 echo
@@ -188,8 +192,7 @@ check "D2 已支付再支付 → 拦截" \
 check "D3 推进 2→3 → 200" \
   "$(curl -s -X POST "$BASE/api/orders/$ORDER1_ID/next" -H "Authorization: Bearer $MGR_T")" '"code":200'
 
-DB_STATUS=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N --default-character-set=utf8mb4 -e \
-  "select status from orders where id=$ORDER1_ID;" 2>/dev/null | tr -d '\r')
+DB_STATUS=$(db "select status from orders where id=$ORDER1_ID;")
 check "D4 数据库状态真的变成 3（CAS 的 SQL 生效）" "$DB_STATUS" "3"
 
 check "D5 推进 3→4 → 200" \
@@ -247,8 +250,7 @@ check "F1 二店店长查一店订单 → 200（跨店可查）" \
   "$(curl -s "$BASE/api/orders/$ORDER1_ID" -H "Authorization: Bearer $MGR2_T")" '"code":200'
 
 # 用订单号而不是 id 判断"列表里有这一单"：id 是数字，会误匹配到别的 id 前缀
-ORDER1_NO=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N --default-character-set=utf8mb4 -e \
-  "select order_no from orders where id=$ORDER1_ID;" 2>/dev/null | tr -d '\r')
+ORDER1_NO=$(db "select order_no from orders where id=$ORDER1_ID;")
 check "F2 二店店长列表里有一店的单（不再按店过滤）" \
   "$(curl -s "$BASE/api/orders?page=1&pageSize=20" -H "Authorization: Bearer $MGR2_T")" \
   "\"orderNo\":\"$ORDER1_NO\""
@@ -258,9 +260,190 @@ echo "########## G. 数据完整性 ##########"
 # "袖口有污渍" 的 UTF-8 首字节是 E8A296（袖）；控制台显示 ????? 只是 Git Bash 编码，
 # 数据库里存的必须是真 UTF-8 字节，否则就是真存坏了
 check "G1 中文备注没存坏（查真实字节而不是看控制台乱码）" \
-  "$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N --default-character-set=utf8mb4 -e \
-     "select hex(remark) from orders where id=$ORDER1_ID;" 2>/dev/null)" \
+  "$(db "select hex(remark) from orders where id=$ORDER1_ID;")" \
   "E8A296"
+
+echo
+echo "########## H. 顾客在线支付（后端算金额，顾客传不了）##########"
+
+# 网单必须有配送地址（领域规则）—— 地址用 ASCII：Git Bash 会把 shell 里的中文
+# 按 GBK 发出去，后端按 UTF-8 解析，中文地址经 -d 必然变乱码（文件头那段）
+NEW_ONLINE() {  # NEW_ONLINE <顾客 token> → 打印订单 id
+  local resp
+  resp=$(curl -s -X POST $BASE/api/orders -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $1" \
+    -d '{"source":2,"storeId":1,"deliveryAddress":"Hangzhou Xihu Rd 100","items":[{"categoryId":11,"washTypeId":1,"quantity":1}]}')
+  if ! echo "$resp" | grep -q '"code":200'; then
+    echo "==> [准备失败] 网单没建出来：$resp" >&2; exit 1
+  fi
+  jqf "$resp" id
+}
+
+H1_ID=$(NEW_ONLINE "$CUST1")
+H2_ID=$(NEW_ONLINE "$CUST2")
+echo "  顾客A 的网单 id=$H1_ID   顾客B 的网单 id=$H2_ID"
+
+check "H1 顾客付自己的单 → 200（金额由后端从订单上取，没有 amount 参数）" \
+  "$(curl -s -X POST "$BASE/api/orders/$H1_ID/online-pay?payMethod=wechat" \
+     -H "Authorization: Bearer $CUST1")" '"code":200'
+
+# 一次断言完三个字段：状态进到 2、支付方式落上、钱数对
+# （衬衫普洗 15.00 × 1 件，没券，所以支付额就是 15.00）
+check "H2 库里 status=2 / pay_method=wechat / paid_amount=15.00" \
+  "$(db "select concat_ws('|',status,pay_method,paid_amount) from orders where id=$H1_ID;")" \
+  "2|wechat|15.00"
+
+# 连点两次：第二次读到的已经是"已支付"，领域层直接拦下（400）。
+# 真正的并发撞车在下面那段 —— 那两个请求都会读到 1 态，只能靠 CAS 分胜负
+check "H3 连点两次 → 第二次被领域状态机拦下（不允许支付）" \
+  "$(curl -s -X POST "$BASE/api/orders/$H1_ID/online-pay?payMethod=wechat" \
+     -H "Authorization: Bearer $CUST1")" "不允许支付"
+
+check "H3b 重复点击没有把 paid_amount 变成两倍" \
+  "$(db "select paid_amount from orders where id=$H1_ID;")" "15.00"
+
+check "H4 付别人的单 → 403 无权支付该订单（这单存在，只是不是他的）" \
+  "$(curl -s -X POST "$BASE/api/orders/$H2_ID/online-pay?payMethod=wechat" \
+     -H "Authorization: Bearer $CUST1")" "无权支付该订单"
+
+check "H4b 被拒之后顾客B 的单没被动过（还是 1 态、没付款）" \
+  "$(db "select concat_ws('|',status,ifnull(pay_method,'NULL'),paid_amount) from orders where id=$H2_ID;")" \
+  "1|NULL|0.00"
+
+# 403 排在支付方式校验之前：别人的单不配知道"这单能不能用现金"，
+# 换句话这一条同时也钉住了这两道校验的先后
+check "H4c 连自己都不是这单的主人时，报的是无权而不是支付方式" \
+  "$(curl -s -X POST "$BASE/api/orders/$H2_ID/online-pay?payMethod=cash" \
+     -H "Authorization: Bearer $CUST1")" "无权支付该订单"
+
+check "H5 员工 token 调在线支付 → 401 请使用顾客账号登录（这是顾客自助的端点）" \
+  "$(curl -s -X POST "$BASE/api/orders/$H2_ID/online-pay?payMethod=wechat" \
+     -H "Authorization: Bearer $MGR_T")" "请使用顾客账号登录"
+
+check "H6 无 token → 401 未登录" \
+  "$(curl -s -X POST "$BASE/api/orders/$H2_ID/online-pay?payMethod=wechat")" "未登录"
+
+check "H7 现金 → 400（顾客在手机上点不出柜台动作）" \
+  "$(curl -s -X POST "$BASE/api/orders/$H2_ID/online-pay?payMethod=cash" \
+     -H "Authorization: Bearer $CUST2")" "只支持微信或支付宝"
+
+check "H8 支付方式压根不存在 → 400（枚举转换拦住）" \
+  "$(curl -s -X POST "$BASE/api/orders/$H2_ID/online-pay?payMethod=bitcoin" \
+     -H "Authorization: Bearer $CUST2")" "没有这个支付方式"
+
+check "H9 少了 payMethod 参数 → 400，不是 500" \
+  "$(curl -s -X POST "$BASE/api/orders/$H2_ID/online-pay" \
+     -H "Authorization: Bearer $CUST2")" "缺少参数"
+
+check "H9b 不存在的订单 → 404（顺序：先认出人，再说单子不在）" \
+  "$(curl -s -X POST "$BASE/api/orders/999999/online-pay?payMethod=wechat" \
+     -H "Authorization: Bearer $CUST2")" '"code":404'
+
+check "H9c 一串坏输入下来，顾客B 的单还在 1 态没动过" \
+  "$(db "select concat_ws('|',status,ifnull(pay_method,'NULL'),paid_amount) from orders where id=$H2_ID;")" \
+  "1|NULL|0.00"
+
+echo
+echo "########## H·并发：两个支付同时到 → 恰好一个 200 + 一个 409 ##########"
+# 和 verify-race.sh 同一个手法：行锁把读-改-写的窗口从微秒拉长到秒。
+# 两个请求都会读到 1 态、都会在内存里支付成功，最后卡在同一条
+# UPDATE ... WHERE status = 1 上；锁一放，一个命中 1 行、一个 0 行 → 409。
+# 没有 CAS 的话这里会是两个 200，而钱只收了一次 —— 也就是"订单显示付了两遍"
+#
+# **顺序重放拿不到 409**：第二次读到的已经是 2 态，在领域层就被拦成 400 了（H3）。
+# 409 只在两个请求并行、都读到 1 态时才出现，所以这一条必须真并发才验得到
+# （变量名从 H3_ID 让开：H3 是上面那条连点用例，别被覆盖成别的单）
+RACE_ID=$(NEW_ONLINE "$CUST1")
+echo "  持锁 3 秒 + 并发两个 online-pay（订单 id=$RACE_ID）..."
+docker exec -i yunxi-mysql mysql -uroot -pqwaszx123 yunxi --default-character-set=utf8mb4 \
+  -e "BEGIN; SELECT id FROM orders WHERE id=$RACE_ID FOR UPDATE; SELECT SLEEP(3); COMMIT;" \
+  > /dev/null 2>&1 &
+sleep 1
+curl -s -X POST "$BASE/api/orders/$RACE_ID/online-pay?payMethod=wechat" \
+  -H "Authorization: Bearer $CUST1" > "$TMP/pay-race-1.json" &
+curl -s -X POST "$BASE/api/orders/$RACE_ID/online-pay?payMethod=alipay" \
+  -H "Authorization: Bearer $CUST1" > "$TMP/pay-race-2.json" &
+wait
+P1=$(cat "$TMP/pay-race-1.json"); P2=$(cat "$TMP/pay-race-2.json")
+echo "         请求1: $P1"
+echo "         请求2: $P2"
+
+POK=0; PCONFLICT=0
+echo "$P1$P2" | grep -q '"code":200' && POK=1
+echo "$P1$P2" | grep -q '"code":409' && PCONFLICT=1
+if [ $POK -eq 1 ] && [ $PCONFLICT -eq 1 ]; then
+  echo "  [OK]   H10 恰好一个 200 + 一个 409 —— 第二次支付被 CAS 挡下"; PASS=$((PASS+1))
+else
+  echo "  [FAIL] H10 期望恰好 1 个 200 + 1 个 409"; FAIL=$((FAIL+1))
+fi
+
+# 只断言"有一个 409"是不够的：报错之后如果事务没回滚干净、或者赢的那个把钱记了两遍，
+# 这条也能过。真正要证的是**钱只收了一次**
+check "H10b 状态只推进到 2、钱只收了一次（409 那条真的回滚了）" \
+  "$(db "select concat_ws('|',status,paid_amount) from orders where id=$RACE_ID;")" "2|15.00"
+
+echo
+echo "########## I. 快递单号（仅网单·派送中）##########"
+
+# 造一张走到派送中（6 态）的网单：已付 → 推进 2→3→4→6
+I1_ID=$(NEW_ONLINE "$CUST1")
+curl -s -X POST "$BASE/api/orders/$I1_ID/online-pay?payMethod=wechat" -H "Authorization: Bearer $CUST1" > /dev/null
+for _ in 1 2 3; do
+  curl -s -X POST "$BASE/api/orders/$I1_ID/next" -H "Authorization: Bearer $MGR_T" > /dev/null
+done
+I1_STATUS=$(db "select status from orders where id=$I1_ID;")
+echo "  网单 id=$I1_ID 推到状态=$I1_STATUS（期望 6=派送中）"
+if [ "$I1_STATUS" != "6" ]; then
+  echo "==> [准备失败] 网单没走到 6 态，快递单号的用例前置不成立"; exit 1
+fi
+
+check "I1 派送中录入单号 → 200" \
+  "$(curl -s -X POST "$BASE/api/orders/$I1_ID/express?expressNo=SF1234567890" \
+     -H "Authorization: Bearer $MGR_T")" '"code":200'
+
+check "I2 单号真的落库了（证明走的是那条 CAS 语句，不是内存里改改）" \
+  "$(db "select express_no from orders where id=$I1_ID;")" "SF1234567890"
+
+check "I3 录入单号**不推进状态**，仍在 6 态" \
+  "$(db "select status from orders where id=$I1_ID;")" "6"
+
+# ── 下面四条必须紧挨着 I3、在 6→7 之前跑完 ──
+# 它们在别的状态上也会失败，而且失败消息**恰好就是期望的那句**：
+# 后面 I5 把单推到 7 态之后，任何坏输入都会报"只有派送中"。
+# 顺序反了的话，长度校验有没有写、员工校验有没有生效，全都看不出来 —— 一条全绿的假绿
+check "I4 顾客 token 录单号 → 401 请使用员工账号操作" \
+  "$(curl -s -X POST "$BASE/api/orders/$I1_ID/express?expressNo=SF999" \
+     -H "Authorization: Bearer $CUST1")" "请使用员工账号操作"
+
+check "I5 少了 expressNo 参数 → 400，不是 500" \
+  "$(curl -s -X POST "$BASE/api/orders/$I1_ID/express" \
+     -H "Authorization: Bearer $MGR_T")" "缺少参数"
+
+# express_no 是 VARCHAR(50)：没有这道长度校验的话，51 个字会一路走到 UPDATE
+# 才被 MySQL 弹回来（DataTooLong 英文异常 → 500），而不是一句给用户看的话
+check "I6 超过 50 个字符 → 400（不是让 MySQL 抛 DataTooLong 变 500）" \
+  "$(curl -s -X POST "$BASE/api/orders/$I1_ID/express?expressNo=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" \
+     -H "Authorization: Bearer $MGR_T")" "不能超过"
+
+check "I7 空白串 → 400（前端把 \"   \" 原样提交是最常见的坏输入）" \
+  "$(curl -s -X POST "$BASE/api/orders/$I1_ID/express?expressNo=%20%20%20" \
+     -H "Authorization: Bearer $MGR_T")" "不能为空"
+
+check "I7b 四次坏输入之后库里还是原来那个单号（没有半截写入）" \
+  "$(db "select express_no from orders where id=$I1_ID;")" "SF1234567890"
+
+check "I8 再推进 6→7 → 200（网单已付清，放行）" \
+  "$(curl -s -X POST "$BASE/api/orders/$I1_ID/next" -H "Authorization: Bearer $MGR_T")" '"code":200'
+
+check "I9 已完成的单再补录 → 400 派送中（事后补票会让运单和订单状态对不上）" \
+  "$(curl -s -X POST "$BASE/api/orders/$I1_ID/express?expressNo=SF999" \
+     -H "Authorization: Bearer $MGR_T")" "派送中"
+
+# ORDER1 是门店单（已到 7 态）—— 来源检查在状态检查之前，所以报的是"只有网单"。
+# 这一条也钉住了检查顺序：反过来就会报"派送中"，而那句在 7 态下没有信息量
+check "I10 门店单录单号 → 400 只有网单（衣服在店里等顾客来取）" \
+  "$(curl -s -X POST "$BASE/api/orders/$ORDER1_ID/express?expressNo=SF999" \
+     -H "Authorization: Bearer $MGR_T")" "只有网单"
 
 echo
 echo "================================"

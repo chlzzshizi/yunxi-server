@@ -36,6 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -62,6 +63,7 @@ class OrderAppServiceTest {
     private PriceRepository priceRepository;
     private StoreRepository storeRepository;
     private CustomerRepository customerRepository;
+    private CouponAppService couponAppService;
     private OrderAppService orderAppService;
 
     private static final BigDecimal TOTAL = new BigDecimal("30.00");
@@ -69,6 +71,8 @@ class OrderAppServiceTest {
     private static final Long STORE_B = 2L;
     /** 门店单里员工填的顾客 id —— 现有用例里的 100L 都是它 */
     private static final Long CUSTOMER = 100L;
+    /** 用在这组用例里的券 id（券服务是假的，这个数字只要前后一致就行） */
+    private static final Long COUPON = 55L;
     /** 网单的配送地址 —— 网单必填，所以每个网单用例都得带上一个 */
     private static final String ADDRESS = "杭州市西湖区文一西路 100 号";
 
@@ -86,8 +90,13 @@ class OrderAppServiceTest {
         priceRepository = mock(PriceRepository.class);
         storeRepository = mock(StoreRepository.class);
         customerRepository = mock(CustomerRepository.class);
+        // 券的校验/核销全在 CouponAppService 里（它自己去查库），对订单应用服务来说
+        // 就是个"能用就给你折扣率、不能用就抛 400"的黑盒 —— 这里假造它，
+        // 订单这边的职责只是"什么时候问、拿到折扣往哪儿用、什么时候核销"
+        couponAppService = mock(CouponAppService.class);
         orderAppService = new OrderAppService(
-                orderRepository, priceRepository, storeRepository, customerRepository);
+                orderRepository, priceRepository, storeRepository, customerRepository,
+                couponAppService);
         // CAS 更新默认"成功"（Mockito 对 boolean 默认返回 false，
         // 不显式打桩的话每个状态操作测试都会撞上 409）
         when(orderRepository.updateStatusCas(any(), any())).thenReturn(true);
@@ -132,6 +141,16 @@ class OrderAppServiceTest {
         return order;
     }
 
+    /** 造一个已落库的**网单**（含 ID）—— 在线支付和快递单号都只对它有意义 */
+    private Order persistedOnlineOrder(Long id, Long storeId, Long customerId) {
+        List<OrderItem> items = List.of(
+                new OrderItem(1L, 1L, 2, new BigDecimal("15.00"), null));
+        Order order = new Order("YX-TEST-ON" + id, storeId, customerId,
+                OrderSource.ONLINE, items);
+        order.setId(id);
+        return order;
+    }
+
     private void stubFind(Order order) {
         when(orderRepository.findById(order.getId())).thenReturn(Optional.of(order));
     }
@@ -149,7 +168,7 @@ class OrderAppServiceTest {
         @DisplayName("门店单必须有操作员工（没有 → 401，且不落库）")
         void storeOrderRequiresStaff() {
             assertThatThrownBy(() -> orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.STORE, items, null, OrderExtras.EMPTY))
+                    STORE_A, 100L, OrderSource.STORE, items, null, OrderExtras.EMPTY, null))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("员工账号");
 
@@ -161,7 +180,7 @@ class OrderAppServiceTest {
         void storeOrderRecordsOperatorAndExtras() {
             Result<OrderView> result = orderAppService.createOrder(
                     STORE_A, 100L, OrderSource.STORE, items, 9L,
-                    new OrderExtras(LocalDateTime.now(), "3 号楼 502", "袖口有污渍"));
+                    new OrderExtras(LocalDateTime.now(), "3 号楼 502", "袖口有污渍"), null);
 
             assertThat(result.code()).isEqualTo(200);
             OrderView saved = result.data();
@@ -177,7 +196,7 @@ class OrderAppServiceTest {
         void onlineOrderNeedsNoStaff() {
             // extras 必须带地址 —— 网单没地址连 Order 都建不出来（见 OnlineDeliveryAddress）
             Result<OrderView> result = orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.ONLINE, items, null, ONLINE_EXTRAS);
+                    STORE_A, 100L, OrderSource.ONLINE, items, null, ONLINE_EXTRAS, null);
 
             assertThat(result.code()).isEqualTo(200);
             assertThat(result.data().staffId()).isNull();
@@ -188,7 +207,7 @@ class OrderAppServiceTest {
         @DisplayName("空明细 → 400，不落库")
         void emptyItemsRejected() {
             assertThatThrownBy(() -> orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.STORE, List.of(), 9L, OrderExtras.EMPTY))
+                    STORE_A, 100L, OrderSource.STORE, List.of(), 9L, OrderExtras.EMPTY, null))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("至少需要一条明细");
 
@@ -208,7 +227,7 @@ class OrderAppServiceTest {
             // 999 没打桩：Mockito 对 Optional 默认返回 empty()，
             // 正好等于"没这家店"，也等于"店存在但已停业"—— 仓储的 SQL 把两者过滤成了一件事
             assertThatThrownBy(() -> orderAppService.createOrder(
-                    999L, 100L, OrderSource.ONLINE, ITEMS, null, ONLINE_EXTRAS))
+                    999L, 100L, OrderSource.ONLINE, ITEMS, null, ONLINE_EXTRAS, null))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("门店不存在或已停业");
 
@@ -222,7 +241,7 @@ class OrderAppServiceTest {
             // 地址留空的话它照样会抛 400 —— 但那是另一条规则抛的，这条用例就变成
             // "测了地址"还自称测了门店（断言过的理由必须也是被测的那个）
             assertThatThrownBy(() -> orderAppService.createOrder(
-                    999L, 100L, OrderSource.ONLINE, ITEMS, null, ONLINE_EXTRAS))
+                    999L, 100L, OrderSource.ONLINE, ITEMS, null, ONLINE_EXTRAS, null))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("门店");
 
@@ -233,7 +252,7 @@ class OrderAppServiceTest {
         @DisplayName("门店单不查门店表 —— storeId 来自员工 token，是服务器签发的，不用回库再问一遍")
         void storeOrderSkipsStoreLookup() {
             orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY);
+                    STORE_A, 100L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY, null);
 
             verify(storeRepository, never()).findOpenById(any());
         }
@@ -256,7 +275,7 @@ class OrderAppServiceTest {
             // 不拦的话会建出一张挂在幽灵顾客身上的单：它不报错，但从此所有
             // "按顾客查订单"的地方都会莫名其妙地少一条，而且没有外键能帮你找回来
             assertThatThrownBy(() -> orderAppService.createOrder(
-                    STORE_A, 999L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY))
+                    STORE_A, 999L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY, null))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("顾客不存在");
 
@@ -267,7 +286,7 @@ class OrderAppServiceTest {
         @DisplayName("顾客校验在算价之前 —— 人都没对上就别白查一次价目表")
         void customerCheckedBeforePricing() {
             assertThatThrownBy(() -> orderAppService.createOrder(
-                    STORE_A, 999L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY))
+                    STORE_A, 999L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY, null))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("顾客");
 
@@ -278,7 +297,7 @@ class OrderAppServiceTest {
         @DisplayName("顾客存在 → 照常建单（校验没有误伤正常路径）")
         void knownCustomerPasses() {
             Result<OrderView> result = orderAppService.createOrder(
-                    STORE_A, CUSTOMER, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY);
+                    STORE_A, CUSTOMER, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY, null);
 
             assertThat(result.code()).isEqualTo(200);
             verify(customerRepository).findById(CUSTOMER);
@@ -289,7 +308,7 @@ class OrderAppServiceTest {
         @DisplayName("网单不查顾客表 —— customerId 取自顾客 token，服务器签发的，不用回库再问一遍")
         void onlineOrderSkipsCustomerLookup() {
             orderAppService.createOrder(
-                    STORE_A, CUSTOMER, OrderSource.ONLINE, ITEMS, null, ONLINE_EXTRAS);
+                    STORE_A, CUSTOMER, OrderSource.ONLINE, ITEMS, null, ONLINE_EXTRAS, null);
 
             verify(customerRepository, never()).findById(any());
         }
@@ -310,7 +329,7 @@ class OrderAppServiceTest {
                     new OrderItemCommand(1L, 1L, 2, null));
 
             Result<OrderView> result = orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.STORE, twoShirts, 9L, OrderExtras.EMPTY);
+                    STORE_A, 100L, OrderSource.STORE, twoShirts, 9L, OrderExtras.EMPTY, null);
 
             assertThat(result.data().items().get(0).unitPrice())
                     .isEqualByComparingTo("15.00");
@@ -330,7 +349,7 @@ class OrderAppServiceTest {
                     new OrderItemCommand(1L, 3L, 1, null));
 
             Result<OrderView> result = orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.STORE, three, 9L, OrderExtras.EMPTY);
+                    STORE_A, 100L, OrderSource.STORE, three, 9L, OrderExtras.EMPTY, null);
 
             verify(priceRepository, times(1)).findPricesByCategoryIds(any());
             assertThat(result.data().totalAmount()).isEqualByComparingTo("58.00");
@@ -342,7 +361,7 @@ class OrderAppServiceTest {
             when(priceRepository.findPricesByCategoryIds(any())).thenReturn(Map.of());
 
             assertThatThrownBy(() -> orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY))
+                    STORE_A, 100L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY, null))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("第 1 条明细的衣物分类或洗涤方式不存在");
 
@@ -361,7 +380,7 @@ class OrderAppServiceTest {
 
             assertThatThrownBy(() -> orderAppService.createOrder(
                     STORE_A, 100L, OrderSource.STORE,
-                    List.of(new OrderItemCommand(13L, 1L, 1, null)), 9L, OrderExtras.EMPTY))
+                    List.of(new OrderItemCommand(13L, 1L, 1, null)), 9L, OrderExtras.EMPTY, null))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("「羽绒服」不支持「普洗」");
         }
@@ -370,7 +389,7 @@ class OrderAppServiceTest {
         @DisplayName("空明细先被拦下 —— 不白查一次价目表")
         void emptyItemsNeverTouchesPriceTable() {
             assertThatThrownBy(() -> orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.STORE, List.of(), 9L, OrderExtras.EMPTY))
+                    STORE_A, 100L, OrderSource.STORE, List.of(), 9L, OrderExtras.EMPTY, null))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("至少需要一条明细");
 
@@ -614,7 +633,7 @@ class OrderAppServiceTest {
                     .when(orderRepository).save(any());
 
             Result<OrderView> result = orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY);
+                    STORE_A, 100L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY, null);
 
             assertThat(result.code()).isEqualTo(200);
             verify(orderRepository, times(2)).save(any());
@@ -627,7 +646,7 @@ class OrderAppServiceTest {
                     .when(orderRepository).save(any());
 
             assertThatThrownBy(() -> orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY))
+                    STORE_A, 100L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY, null))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("订单号生成冲突");
 
@@ -667,6 +686,338 @@ class OrderAppServiceTest {
                     .isInstanceOf(BusinessException.class);
 
             verify(orderRepository, never()).save(any());
+        }
+    }
+
+    // ════════════════ 券-订单抵扣 ════════════════
+
+    /**
+     * 这一组只测**订单侧**的编排：什么时候问券、折扣用在哪、什么时候核销。
+     * "这张券能不能用"是 CouponAppService 的职责（要查库），这里把它当成黑盒 ——
+     * 它要么回一个折扣率，要么抛 400，订单这边不关心它怎么判断的。
+     */
+    @Nested
+    @DisplayName("券-订单抵扣")
+    class CouponDeduction {
+
+        /** 5 折。明细是 2 件 × 15.00 = 30.00，折后 15.00 */
+        private static final BigDecimal HALF = new BigDecimal("0.50");
+
+        @Test
+        @DisplayName("门店单也能用券（2026-09-12 放开的规则）：折后价 + 记下省了多少")
+        void storeOrderCanUseCoupon() {
+            when(couponAppService.resolveDiscount(COUPON, CUSTOMER)).thenReturn(HALF);
+
+            Result<OrderView> result = orderAppService.createOrder(
+                    STORE_A, CUSTOMER, OrderSource.STORE, ITEMS, 9L,
+                    OrderExtras.EMPTY, COUPON);
+
+            OrderView saved = result.data();
+            // total_amount 存的是**折后应付**（不是折前价）：否则收银台会按全价收钱
+            assertThat(saved.totalAmount()).isEqualByComparingTo("15.00");
+            // discount_amount 只作展示/对账，不参与任何状态判断
+            assertThat(saved.discountAmount()).isEqualByComparingTo("15.00");
+            assertThat(saved.couponId()).isEqualTo(COUPON);
+            // 折后了不代表付过了 —— 建单出来还是待支付
+            assertThat(saved.paidAmount()).isEqualByComparingTo("0.00");
+            assertThat(saved.status()).isEqualTo(OrderStatus.PENDING_PAY);
+        }
+
+        @Test
+        @DisplayName("网单用券：券服务同样被问、被核销（顾客自助，没有经手员工）")
+        void onlineOrderCanUseCoupon() {
+            when(couponAppService.resolveDiscount(COUPON, CUSTOMER)).thenReturn(HALF);
+            stubSaveAssignsId(88L);
+
+            orderAppService.createOrder(
+                    STORE_A, CUSTOMER, OrderSource.ONLINE, ITEMS, null,
+                    ONLINE_EXTRAS, COUPON);
+
+            // 最后一个参数 null = used_staff_id 为空，这正是"顾客自己在用"的痕迹
+            verify(couponAppService).consume(COUPON, CUSTOMER, 88L, null);
+        }
+
+        @Test
+        @DisplayName("不带券 → 完全不碰券服务，且 discount_amount 是 0 不是 null")
+        void noCouponNeverTouchesCouponService() {
+            Result<OrderView> result = orderAppService.createOrder(
+                    STORE_A, CUSTOMER, OrderSource.STORE, ITEMS, 9L,
+                    OrderExtras.EMPTY, null);
+
+            verify(couponAppService, never()).resolveDiscount(any(), any());
+            verify(couponAppService, never()).consume(any(), any(), any(), any());
+            // 0 而不是 null：discount_amount 列是 NOT NULL DEFAULT 0.00，
+            // 留 null 会让**每一张不带券的订单**都插不进去（绝大多数订单都不带券）
+            assertThat(result.data().discountAmount()).isEqualByComparingTo("0.00");
+            assertThat(result.data().totalAmount()).isEqualByComparingTo("30.00");
+        }
+
+        @Test
+        @DisplayName("券的校验在算价之前 —— 券都用不了就别白查一次价目表")
+        void couponCheckedBeforePricing() {
+            when(couponAppService.resolveDiscount(COUPON, CUSTOMER))
+                    .thenThrow(new BusinessException("该优惠券不属于这位顾客"));
+
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    STORE_A, CUSTOMER, OrderSource.STORE, ITEMS, 9L,
+                    OrderExtras.EMPTY, COUPON))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("不属于这位顾客");
+
+            verify(priceRepository, never()).findPricesByCategoryIds(any());
+            verify(orderRepository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("核销发生在**落库之后**，带的是真实的自增订单 id（used_order_id 靠它）")
+        void consumeHappensAfterSaveWithRealOrderId() {
+            when(couponAppService.resolveDiscount(COUPON, CUSTOMER)).thenReturn(HALF);
+            // 订单 id 是仓储在 save 里回填的（useGeneratedKeys）。假仓储不会真的回填，
+            // 所以这里手动补上 —— 顺便证明"核销时 id 已经存在了"
+            stubSaveAssignsId(77L);
+
+            orderAppService.createOrder(
+                    STORE_A, CUSTOMER, OrderSource.STORE, ITEMS, 9L,
+                    OrderExtras.EMPTY, COUPON);
+
+            // 第四个参数是经手员工 —— 门店单有值，这正是"这券是谁烧的"的答案
+            verify(couponAppService).consume(COUPON, CUSTOMER, 77L, 9L);
+        }
+
+        @Test
+        @DisplayName("券被抢先核销（CAS 0 行 → 409）→ 异常往外抛，不被订单号重试循环吞掉")
+        void consumeConflictIsNotSwallowed() {
+            when(couponAppService.resolveDiscount(COUPON, CUSTOMER)).thenReturn(HALF);
+            doThrow(new BusinessException(409, "该优惠券已被使用，请刷新后重试"))
+                    .when(couponAppService).consume(any(), any(), any(), any());
+
+            // 订单号重试循环只 catch DuplicateKeyException —— 券的 409 必须穿过去，
+            // 否则"券没了"会被当成"号撞了"，白白重试三次再报一个牛头不对马嘴的错
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    STORE_A, CUSTOMER, OrderSource.STORE, ITEMS, 9L,
+                    OrderExtras.EMPTY, COUPON))
+                    .isInstanceOf(BusinessException.class)
+                    .extracting("code").isEqualTo(409);
+
+            verify(orderRepository, times(1)).save(any());
+        }
+
+        @Test
+        @DisplayName("撞号重试：重试出来的新单**同样是折后价**（折扣必须打在循环里）")
+        void discountAppliedOnEveryRetryAttempt() {
+            when(couponAppService.resolveDiscount(COUPON, CUSTOMER)).thenReturn(HALF);
+            // 第一次 save 撞号，第二次放行
+            doThrow(new DuplicateKeyException("uk_order_no"))
+                    .doAnswer(inv -> null)
+                    .when(orderRepository).save(any());
+
+            Result<OrderView> result = orderAppService.createOrder(
+                    STORE_A, CUSTOMER, OrderSource.STORE, ITEMS, 9L,
+                    OrderExtras.EMPTY, COUPON);
+
+            // 每次重试都是一张新 new 出来的 Order，构造器会按明细重算折前总价。
+            // 折扣若写在循环外，就是对着**上一轮那张已经丢掉的**对象打的折 ——
+            // 最终落库的是一张全价单。这条路径要先撞一次号才走得到，平时测不出来，
+            // 所以专门在这里钉住：重试成功的那张也是 15.00
+            assertThat(result.data().totalAmount()).isEqualByComparingTo("15.00");
+            assertThat(result.data().discountAmount()).isEqualByComparingTo("15.00");
+        }
+
+        /** 模拟"落库时回填自增 id"（真实实现在 save 里 set 回去） */
+        private void stubSaveAssignsId(Long id) {
+            doAnswer(inv -> {
+                ((Order) inv.getArgument(0)).setId(id);
+                return null;
+            }).when(orderRepository).save(any());
+        }
+    }
+
+    // ════════════════ 顾客在线支付 ════════════════
+
+    @Nested
+    @DisplayName("顾客在线支付")
+    class OnlinePay {
+
+        @Test
+        @DisplayName("付自己的单 → 状态 1→2，支付方式落上，收的是**订单上的金额**")
+        void paysOwnOrder() {
+            Order order = persistedOnlineOrder(1L, STORE_A, CUSTOMER);
+            stubFind(order);
+
+            Result<Void> result = orderAppService.onlinePay(1L, PayMethod.WECHAT, CUSTOMER);
+
+            assertThat(result.code()).isEqualTo(200);
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.PAID);
+            assertThat(order.getPayMethod()).isEqualTo(PayMethod.WECHAT);
+            assertThat(order.getPaidAmount()).isEqualByComparingTo(TOTAL);
+            verify(orderRepository).updateStatusCas(order, OrderStatus.PENDING_PAY);
+        }
+
+        @Test
+        @DisplayName("用券的单收的是**折后价** —— 端点上没有一个可以被篡改的数字")
+        void paysTheDiscountedAmount() {
+            Order order = persistedOnlineOrder(1L, STORE_A, CUSTOMER);
+            order.applyCoupon(COUPON, new BigDecimal("0.50"));   // 30.00 → 15.00
+            stubFind(order);
+
+            orderAppService.onlinePay(1L, PayMethod.ALIPAY, CUSTOMER);
+
+            // 顾客没有 amount 参数可传：金额只能来自订单，而订单上已经是折后应付。
+            // 这一条把 §5.8（total_amount 存折后）和这个端点接在了一起 ——
+            // 若 total_amount 存折前价，这里就会向顾客多收一倍
+            assertThat(order.getPaidAmount()).isEqualByComparingTo("15.00");
+            assertThat(order.getPayMethod()).isEqualTo(PayMethod.ALIPAY);
+        }
+
+        @Test
+        @DisplayName("付别人的单 → 403，且一分钱没动")
+        void cannotPayOthersOrder() {
+            Order order = persistedOnlineOrder(1L, STORE_A, 100L);
+            stubFind(order);
+
+            assertThatThrownBy(() -> orderAppService.onlinePay(1L, PayMethod.WECHAT, 200L))
+                    .isInstanceOf(BusinessException.class)
+                    .extracting("code").isEqualTo(403);
+
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.PENDING_PAY);
+            assertThat(order.getPaidAmount()).isEqualByComparingTo(BigDecimal.ZERO);
+        }
+
+        @Test
+        @DisplayName("员工 token → 401（application 层自己也守一道，不押在 controller 的自觉上）")
+        void staffTokenRejected() {
+            assertThatThrownBy(() -> orderAppService.onlinePay(1L, PayMethod.WECHAT, null))
+                    .isInstanceOf(BusinessException.class)
+                    .extracting("code").isEqualTo(401);
+        }
+
+        @Test
+        @DisplayName("现金 → 400（顾客在手机上点不出柜台动作）")
+        void cashRejected() {
+            Order order = persistedOnlineOrder(1L, STORE_A, CUSTOMER);
+            stubFind(order);
+
+            assertThatThrownBy(() -> orderAppService.onlinePay(1L, PayMethod.CASH, CUSTOMER))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("只支持微信或支付宝");
+
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.PENDING_PAY);
+        }
+
+        @Test
+        @DisplayName("订单不存在 → 404")
+        void orderNotFound() {
+            assertThatThrownBy(() -> orderAppService.onlinePay(1L, PayMethod.WECHAT, CUSTOMER))
+                    .isInstanceOf(BusinessException.class)
+                    .extracting("code").isEqualTo(404);
+        }
+
+        @Test
+        @DisplayName("连点两次 → 第二次读到的是已支付状态，领域层拦下（不允许重复支付）")
+        void secondClickRejected() {
+            Order order = persistedOnlineOrder(1L, STORE_A, CUSTOMER);
+            stubFind(order);
+            orderAppService.onlinePay(1L, PayMethod.WECHAT, CUSTOMER);
+
+            assertThatThrownBy(() -> orderAppService.onlinePay(1L, PayMethod.WECHAT, CUSTOMER))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("不允许支付");
+        }
+
+        @Test
+        @DisplayName("两个请求同时付（CAS 0 行）→ 409，不是覆盖对方")
+        void casConflictReturns409() {
+            Order order = persistedOnlineOrder(1L, STORE_A, CUSTOMER);
+            stubFind(order);
+            when(orderRepository.updateStatusCas(order, OrderStatus.PENDING_PAY))
+                    .thenReturn(false);
+
+            assertThatThrownBy(() -> orderAppService.onlinePay(1L, PayMethod.WECHAT, CUSTOMER))
+                    .isInstanceOf(BusinessException.class)
+                    .extracting("code").isEqualTo(409);
+        }
+
+        @Test
+        @DisplayName("顾客支付**不能抹掉 staff_id** —— 门店单上那是建单员工（回归：recordOperator(null)）")
+        void doesNotWipeStaffId() {
+            // 门店单也会有顾客在线支付（衣服还在店里时先在手机上付掉）。
+            // 若 saveStatusChange 无条件 recordOperator(operatorStaffId)，这里传的 null
+            // 就会把 staff_id 清空 —— 那是"谁经手的这张单"唯一的线索，且**平时看不出来**
+            Order order = persistedOrder(1L, STORE_A, CUSTOMER);
+            order.recordOperator(9L);
+            stubFind(order);
+
+            orderAppService.onlinePay(1L, PayMethod.WECHAT, CUSTOMER);
+
+            assertThat(order.getStaffId()).isEqualTo(9L);
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.PAID);
+        }
+    }
+
+    // ════════════════ 快递单号 ════════════════
+
+    /**
+     * 这一组只测编排（谁能不能调、走没走 CAS）。
+     * "哪张单能录、什么时候能录、单号多长"是订单自己的不变量，在 OrderTest 里测
+     */
+    @Nested
+    @DisplayName("录入快递单号")
+    class ExpressNo {
+
+        private static final String NO = "SF1234567890";
+
+        @Test
+        @DisplayName("员工给派送中的网单录入 → 单号落上，CAS 带的是 6 态")
+        void recordsExpressNo() {
+            Order order = onlineAtDelivering(1L, CUSTOMER);
+            stubFind(order);
+
+            Result<Void> result = orderAppService.fillExpressNo(1L, NO, 9L);
+
+            assertThat(result.code()).isEqualTo(200);
+            assertThat(order.getExpressNo()).isEqualTo(NO);
+            // 状态没变，CAS 的期望值仍是 6 —— 这次更新实际是在**守**这一列
+            verify(orderRepository).updateStatusCas(order, OrderStatus.DELIVERING);
+            assertThat(order.getStaffId()).isEqualTo(9L);   // 员工侧照旧留痕
+        }
+
+        @Test
+        @DisplayName("顾客 token → 401")
+        void customerTokenRejected() {
+            assertThatThrownBy(() -> orderAppService.fillExpressNo(1L, NO, null))
+                    .isInstanceOf(BusinessException.class)
+                    .extracting("code").isEqualTo(401);
+        }
+
+        @Test
+        @DisplayName("订单不存在 → 404")
+        void orderNotFound() {
+            assertThatThrownBy(() -> orderAppService.fillExpressNo(1L, NO, 9L))
+                    .isInstanceOf(BusinessException.class)
+                    .extracting("code").isEqualTo(404);
+        }
+
+        @Test
+        @DisplayName("另一个员工同时把单推进到已完成（CAS 0 行）→ 409，单号不会写到已完成的单上")
+        void casConflictReturns409() {
+            Order order = onlineAtDelivering(1L, CUSTOMER);
+            stubFind(order);
+            when(orderRepository.updateStatusCas(order, OrderStatus.DELIVERING))
+                    .thenReturn(false);
+
+            assertThatThrownBy(() -> orderAppService.fillExpressNo(1L, NO, 9L))
+                    .isInstanceOf(BusinessException.class)
+                    .extracting("code").isEqualTo(409);
+        }
+
+        /** 把一张网单推到派送中（6 态）：先付清，再连推三次 */
+        private Order onlineAtDelivering(Long id, Long customerId) {
+            Order order = persistedOnlineOrder(id, STORE_A, customerId);
+            order.pay(PayMethod.WECHAT, order.getTotalAmount());
+            order.updateStatus();   // 2 → 3
+            order.updateStatus();   // 3 → 4
+            order.updateStatus();   // 4 → 6（网单走 6）
+            return order;
         }
     }
 }

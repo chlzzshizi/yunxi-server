@@ -96,8 +96,12 @@ public class OrderController {
         OrderExtras extras = new OrderExtras(
                 request.appointmentTime(), request.deliveryAddress(), request.remark());
 
+        // couponId 直接透传：券能不能用是应用层的事（要查库），
+        // 这一层连"券是不是他的"都判断不了，也不该在这里写半截校验。
+        // 门店单也能用券（2026-09-12 放开，§5.8）—— 所以这里不再按 source 分流
         return orderAppService.createOrder(
-                storeId, customerId, source, items, operatorStaffId, extras);
+                storeId, customerId, source, items, operatorStaffId, extras,
+                request.couponId());
     }
 
     /**
@@ -156,6 +160,33 @@ public class OrderController {
         Long staffId = requireStaff(http);
         PayMethod method = PayMethod.fromCode(payMethod);
         return orderAppService.finalPay(id, method, staffId);
+    }
+
+    /**
+     * 顾客在线支付（仅顾客，且只能付自己的单）。
+     *
+     * **没有 amount 参数**，这是刻意的：金额由后端从订单上取（已是折后应付），
+     * 顾客传不了也就篡改不了。员工那条 pay 保留 amount 是因为柜台要收现金，
+     * 金额得由收银员输 —— 两条路不得不分开，混在一起就等于把"金额可传"
+     * 这个口子开给了顾客
+     */
+    @PostMapping("/{id}/online-pay")
+    public Result<Void> onlinePay(@PathVariable Long id,
+                                  @RequestParam String payMethod,
+                                  HttpServletRequest http) {
+        Long customerId = requireCustomer(http);
+        // 枚举转换失败（如 payMethod=abc）会抛 BusinessException → 全局处理器转 400；
+        // 语法合法但不该由顾客用的（如 cash）由应用层挡，报一句更具体的话
+        PayMethod method = PayMethod.fromCode(payMethod);
+        return orderAppService.onlinePay(id, method, customerId);
+    }
+
+    /** 录入快递单号（仅员工、仅网单派送中） */
+    @PostMapping("/{id}/express")
+    public Result<Void> express(@PathVariable Long id,
+                                @RequestParam String expressNo,
+                                HttpServletRequest http) {
+        return orderAppService.fillExpressNo(id, expressNo, requireStaff(http));
     }
 
     // ──────────────── 身份提取 ────────────────

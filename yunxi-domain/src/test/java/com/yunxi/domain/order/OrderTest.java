@@ -338,4 +338,208 @@ class OrderTest {
             assertThat(order.getRemark()).isNull();
         }
     }
+
+    // ════════════════ 券抵扣 ════════════════
+
+    @Nested
+    @DisplayName("优惠券抵扣")
+    class Coupon {
+
+        private static final BigDecimal HALF = new BigDecimal("0.50");
+
+        @Test
+        @DisplayName("5 折：total_amount 变折后应付，discount_amount 记下省了多少")
+        void halfDiscount() {
+            Order order = newOrder(OrderSource.STORE);
+            assertThat(order.getTotalAmount()).isEqualByComparingTo(TOTAL);
+
+            order.applyCoupon(9L, HALF);
+
+            assertThat(order.getTotalAmount()).isEqualByComparingTo("15.00");
+            assertThat(order.getDiscountAmount()).isEqualByComparingTo("15.00");
+            assertThat(order.getCouponId()).isEqualTo(9L);
+        }
+
+        @Test
+        @DisplayName("折后价才是\"付清\"的基准 —— pay(全额) 收的是折后金额")
+        void paysTheDiscountedAmount() {
+            Order order = newOrder(OrderSource.STORE);
+            order.applyCoupon(9L, HALF);
+
+            // 传折前价 30.00 会被拒：金额校验比的是折后的 totalAmount。
+            // 这就是 total_amount 存折后价的全部意义 —— 收银台不会要求顾客付全款
+            assertThatThrownBy(() -> order.pay(PayMethod.CASH, TOTAL))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("支付金额不正确");
+
+            order.pay(PayMethod.CASH, new BigDecimal("15.00"));
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.PAID);
+        }
+
+        @Test
+        @DisplayName("舍入：折后价 HALF_UP 保留 2 位（不是直接截断）")
+        void roundsHalfUp() {
+            // 3 件 × 15.00 = 45.00，打 8.888 折 → 39.996 → 40.00（HALF_UP）
+            List<OrderItem> items = List.of(
+                    new OrderItem(1L, 1L, 3, new BigDecimal("15.00"), null));
+            Order order = new Order("YX-TEST-0002", 1L, 1L, OrderSource.STORE, items);
+
+            order.applyCoupon(9L, new BigDecimal("0.8888"));
+
+            assertThat(order.getTotalAmount()).isEqualByComparingTo("40.00");
+            // 抵扣额是**相减**出来的，不是另外算一遍折扣率 —— 免得两个数对不上
+            assertThat(order.getDiscountAmount()).isEqualByComparingTo("5.00");
+        }
+
+        @Test
+        @DisplayName("折扣率不合法（null / 0 / 负数 / 大于 1）→ 400，且订单一分钱没动")
+        void illegalDiscountRejected() {
+            Order order = newOrder(OrderSource.STORE);
+
+            assertThatThrownBy(() -> order.applyCoupon(9L, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("折扣率不合法");
+            assertThatThrownBy(() -> order.applyCoupon(9L, BigDecimal.ZERO))
+                    .isInstanceOf(BusinessException.class);
+            assertThatThrownBy(() -> order.applyCoupon(9L, new BigDecimal("-0.5")))
+                    .isInstanceOf(BusinessException.class);
+            assertThatThrownBy(() -> order.applyCoupon(9L, new BigDecimal("1.01")))
+                    .isInstanceOf(BusinessException.class);
+
+            // 被拒之后订单不能被改脏 —— 折扣率和券号一个都不该留下
+            assertThat(order.getTotalAmount()).isEqualByComparingTo(TOTAL);
+            assertThat(order.getDiscountAmount()).isEqualByComparingTo("0.00");
+            assertThat(order.getCouponId()).isNull();
+        }
+
+        @Test
+        @DisplayName("重复用券 → 报错（一张订单只挂一张券，再折一次就是静默少收钱）")
+        void secondCouponRejected() {
+            Order order = newOrder(OrderSource.STORE);
+            order.applyCoupon(9L, HALF);
+
+            assertThatThrownBy(() -> order.applyCoupon(10L, HALF))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("已经使用过优惠券");
+
+            // 第二次没生效：还是第一次折出来的 15.00，没有变成 7.50
+            assertThat(order.getTotalAmount()).isEqualByComparingTo("15.00");
+            assertThat(order.getCouponId()).isEqualTo(9L);
+        }
+
+        @Test
+        @DisplayName("新建订单的 discount_amount 是 0 而不是 null（列是 NOT NULL）")
+        void newOrderHasZeroDiscount() {
+            // 不带券的订单是绝大多数，这个 0 若留成 null，每一张都插不进数据库
+            assertThat(newOrder(OrderSource.STORE).getDiscountAmount())
+                    .isEqualByComparingTo("0.00");
+            assertThat(newOrder(OrderSource.ONLINE).getCouponId()).isNull();
+        }
+    }
+
+    // ════════════════ 快递单号 ════════════════
+
+    @Nested
+    @DisplayName("录入快递单号（网单·派送中）")
+    class ExpressNo {
+
+        private static final String NO = "SF1234567890";
+
+        /** 把一张网单推到派送中（6 态）：先付清，再连推三次（1→2→3→4→6） */
+        private Order onlineAtDelivering() {
+            Order order = newOrder(OrderSource.ONLINE);
+            order.pay(PayMethod.WECHAT, TOTAL);
+            order.updateStatus();
+            order.updateStatus();
+            order.updateStatus();
+            return order;
+        }
+
+        @Test
+        @DisplayName("派送中录入 → 单号落上，**状态仍是 6**（录单号不推进状态机）")
+        void recordsExpressNo() {
+            Order order = onlineAtDelivering();
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.DELIVERING);
+
+            order.fillExpressNo(NO);
+
+            assertThat(order.getExpressNo()).isEqualTo(NO);
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.DELIVERING);
+            assertThat(order.getFinishTime()).isNull();
+        }
+
+        @Test
+        @DisplayName("门店单 → 400（衣服就在店里等顾客来取，根本没有快递这回事）")
+        void storeOrderRejected() {
+            Order order = newOrder(OrderSource.STORE);
+            order.pay(PayMethod.CASH, TOTAL);
+
+            assertThatThrownBy(() -> order.fillExpressNo(NO))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("只有网单");
+            assertThat(order.getExpressNo()).isNull();
+        }
+
+        @Test
+        @DisplayName("还没派送就录 → 400（待支付 1 态 / 待出厂 4 态，都是提前宣布发货）")
+        void notDeliveringRejected() {
+            Order pending = newOrder(OrderSource.ONLINE);
+            assertThatThrownBy(() -> pending.fillExpressNo(NO))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("派送中");
+
+            Order ready = newOrder(OrderSource.ONLINE);
+            ready.pay(PayMethod.WECHAT, TOTAL);
+            ready.updateStatus();   // → 3
+            ready.updateStatus();   // → 4
+            assertThat(ready.getStatus()).isEqualTo(OrderStatus.PENDING_DELIVERY);
+            assertThatThrownBy(() -> ready.fillExpressNo(NO))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("派送中");
+        }
+
+        @Test
+        @DisplayName("已完成再补录 → 400（事后补票会让运单和订单状态对不上）")
+        void completedRejected() {
+            Order order = onlineAtDelivering();
+            order.updateStatus();   // 6 → 7（已付清，放行）
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.COMPLETED);
+
+            assertThatThrownBy(() -> order.fillExpressNo(NO))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("派送中");
+        }
+
+        @Test
+        @DisplayName("空白串 → 400（前端把 \"   \" 原样提交是最常见的坏输入）")
+        void blankRejected() {
+            Order order = onlineAtDelivering();
+
+            assertThatThrownBy(() -> order.fillExpressNo(null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("不能为空");
+            assertThatThrownBy(() -> order.fillExpressNo("   "))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("不能为空");
+
+            assertThat(order.getExpressNo()).isNull();
+        }
+
+        @Test
+        @DisplayName("超过 50 个字符 → 400，而不是让 MySQL 抛 DataTooLong 变成 500")
+        void tooLongRejected() {
+            Order order = onlineAtDelivering();
+
+            // 边界两侧都钉住：50 个字符是合法的，51 个不行
+            // （express_no 是 VARCHAR(50)，没有这道校验就是一路走到 UPDATE 才炸）
+            order.fillExpressNo("X".repeat(Order.EXPRESS_NO_MAX_LENGTH));
+            assertThat(order.getExpressNo()).hasSize(50);
+
+            assertThatThrownBy(() -> order.fillExpressNo("X".repeat(51)))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("不能超过");
+            // 被拒之后还是上一次那个 50 字符的号，没被改脏
+            assertThat(order.getExpressNo()).hasSize(50);
+        }
+    }
 }

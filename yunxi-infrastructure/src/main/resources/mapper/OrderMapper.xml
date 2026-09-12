@@ -14,8 +14,10 @@
         <result column="source"           property="source"/>
         <result column="status"           property="status"/>
         <result column="total_amount"     property="totalAmount"/>
+        <result column="discount_amount"  property="discountAmount"/>
         <result column="paid_amount"      property="paidAmount"/>
         <result column="pay_method"       property="payMethod"/>
+        <result column="coupon_id"        property="couponId"/>
         <result column="final_pay_method" property="finalPayMethod"/>
         <result column="appointment_time" property="appointmentTime"/>
         <result column="delivery_address" property="deliveryAddress"/>
@@ -24,19 +26,23 @@
         <result column="finish_time"      property="finishTime"/>
         <result column="create_time"      property="createTime"/>
     </resultMap>
-    <!-- 插入订单 -->
+    <!-- 插入订单。
+         discount_amount / coupon_id 只在**建单时**写一次，之后的 UPDATE 都不碰它们 ——
+         和 total_amount 一样属于"生下来就定了"的字段（券不退，见设计文档 §5.8）。
+         注意 discount_amount 是 NOT NULL：没券的订单写的是 0.00 而不是 null，
+         这个 0 由 Order 构造器保证（见 Order#discountAmount 的注释）。 -->
     <insert id="insert" parameterType="com.yunxi.infrastructure.persistence.po.OrderPO"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO orders (
             order_no, store_id, customer_id, staff_id,
-            source, status, total_amount, paid_amount,
-            pay_method, final_pay_method,
+            source, status, total_amount, discount_amount, paid_amount,
+            pay_method, coupon_id, final_pay_method,
             appointment_time, delivery_address, express_no,
             remark, finish_time, create_time
         ) VALUES (
                      #{orderNo}, #{storeId}, #{customerId}, #{staffId},
-                     #{source}, #{status}, #{totalAmount}, #{paidAmount},
-                     #{payMethod}, #{finalPayMethod},
+                     #{source}, #{status}, #{totalAmount}, #{discountAmount}, #{paidAmount},
+                     #{payMethod}, #{couponId}, #{finalPayMethod},
                      #{appointmentTime}, #{deliveryAddress}, #{expressNo},
                      #{remark}, #{finishTime}, #{createTime}
                  )

@@ -14,10 +14,12 @@ public class OrderPO {
     private Long staffId;
     private Integer source;      // 数据库存数字，不是枚举
     private Integer status;      // 数据库存数字
-    private BigDecimal totalAmount;
+    private BigDecimal totalAmount;   // 用券后是**折后应付**
+    private BigDecimal discountAmount;
     private BigDecimal paidAmount;
     private String payMethod;     // 数据库存字符串
     private String finalPayMethod;
+    private Long couponId;
     private LocalDateTime appointmentTime;
     private String deliveryAddress;
     private String expressNo;
@@ -49,6 +51,12 @@ public class OrderPO {
 
     public BigDecimal getTotalAmount() { return totalAmount; }
     public void setTotalAmount(BigDecimal totalAmount) { this.totalAmount = totalAmount; }
+
+    public BigDecimal getDiscountAmount() { return discountAmount; }
+    public void setDiscountAmount(BigDecimal discountAmount) { this.discountAmount = discountAmount; }
+
+    public Long getCouponId() { return couponId; }
+    public void setCouponId(Long couponId) { this.couponId = couponId; }
 
     public BigDecimal getPaidAmount() { return paidAmount; }
     public void setPaidAmount(BigDecimal paidAmount) { this.paidAmount = paidAmount; }

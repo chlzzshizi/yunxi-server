@@ -1,5 +1,6 @@
 package com.yunxi.interfaces.controller;
 
+import com.yunxi.application.dto.MyCouponView;
 import com.yunxi.application.service.CouponAppService;
 import com.yunxi.common.Result;
 import com.yunxi.infrastructure.persistence.po.CouponPO;
@@ -51,5 +52,22 @@ public class CouponController {
         }
         Long customerId = (Long) request.getAttribute("customerId");
         return couponAppService.grabCoupon(id, customerId);
+    }
+
+    /**
+     * 我的券（未使用，含 expired 标记）—— 顾客自助，身份只从 token 取。
+     *
+     * 路径叫 /mine 而不是 /my：和 /api/customers/me 同一个约定，
+     * 一眼能认出"这是当前登录者自己的东西，不吃任何 id 参数"。
+     *
+     * 员工 token 给 401 而不是 403：券是顾客的私产，员工压根不是"权限不够"，
+     * 而是根本没有对应的东西 —— 与抢券接口保持同一句话。
+     */
+    @GetMapping("/mine")
+    public Result<List<MyCouponView>> myCoupons(HttpServletRequest request) {
+        if (!"customer".equals(request.getAttribute("type"))) {
+            return Result.fail(401, "请使用顾客账号登录");
+        }
+        return couponAppService.listMyCoupons((Long) request.getAttribute("customerId"));
     }
 }

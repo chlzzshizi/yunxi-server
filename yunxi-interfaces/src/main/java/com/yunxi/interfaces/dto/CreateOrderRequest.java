@@ -14,5 +14,6 @@ public record CreateOrderRequest(
         List<OrderItemRequest> items,// 前端传的衣物列表
         LocalDateTime appointmentTime, // 网单：预约取送时间
         String deliveryAddress,      // 网单：配送地址
-        String remark                // 备注
+        String remark,               // 备注
+        Long couponId                // 优惠券（coupons.id，不是抢券记录 id）。门店单/网单都能用，见 §5.8
 ) {}

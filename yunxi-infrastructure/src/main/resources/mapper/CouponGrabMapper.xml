@@ -4,6 +4,18 @@
 
 <mapper namespace="com.yunxi.infrastructure.persistence.mapper.CouponGrabMapper">
 
+    <resultMap id="CouponGrabResultMap"
+               type="com.yunxi.infrastructure.persistence.po.CouponGrabPO">
+        <id     column="id"            property="id"/>
+        <result column="coupon_id"     property="couponId"/>
+        <result column="customer_id"   property="customerId"/>
+        <result column="grab_time"     property="grabTime"/>
+        <result column="used"          property="used"/>
+        <result column="used_time"     property="usedTime"/>
+        <result column="used_order_id" property="usedOrderId"/>
+        <result column="used_staff_id" property="usedStaffId"/>
+    </resultMap>
+
     <insert id="insert" parameterType="com.yunxi.infrastructure.persistence.po.CouponGrabPO"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO coupon_grabs (coupon_id, customer_id)
@@ -12,5 +24,44 @@
 
     <select id="countByCouponId" resultType="long">
         SELECT COUNT(*) FROM coupon_grabs WHERE coupon_id = #{couponId}
+    </select>
+
+    <select id="selectByCouponAndCustomer" resultMap="CouponGrabResultMap">
+        SELECT * FROM coupon_grabs
+        WHERE coupon_id = #{couponId} AND customer_id = #{customerId}
+    </select>
+
+    <!-- 核销：一条语句同时做三件事 —— 判"还没用过"、置为已用、写使用记录。
+         合成一条是要紧的：拆成"先查再改"就有了时间窗，同一张券能被用两次。
+         used_time 用 NOW() 而不是应用传进来的时间：时间是**数据库**的证词，
+         多实例时钟不一致时它仍是唯一的。 -->
+    <update id="markUsed">
+        UPDATE coupon_grabs
+        SET used          = 1,
+            used_time     = NOW(),
+            used_order_id = #{orderId},
+            used_staff_id = #{staffId}
+        WHERE coupon_id = #{couponId}
+          AND customer_id = #{customerId}
+          AND used = 0
+    </update>
+
+    <!-- 我的券（未使用）。按到期时间正序：先过期的排前面，前端要置灰的就是它们。
+         列名不用手写别名：application.yml 开了 map-underscore-to-camel-case，
+         只有 g.id 要改个名（CouponGrabDetailPO 上没有 id 这个字段，
+         券的唯一标识是"抢到的哪一张"，所以叫 grab_id）。 -->
+    <select id="selectUnusedByCustomer" resultType="com.yunxi.infrastructure.persistence.po.CouponGrabDetailPO">
+        SELECT g.id AS grab_id,
+               g.coupon_id,
+               g.grab_time,
+               c.name,
+               c.discount,
+               c.start_time,
+               c.end_time
+        FROM coupon_grabs g
+        JOIN coupons c ON c.id = g.coupon_id
+        WHERE g.customer_id = #{customerId}
+          AND g.used = 0
+        ORDER BY c.end_time ASC, g.id DESC
     </select>
 </mapper>

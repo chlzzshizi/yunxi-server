@@ -6,11 +6,16 @@ import com.yunxi.common.enums.OrderStatus;
 import com.yunxi.common.enums.PayMethod;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 public class Order {
+
+    /** 快递单号长度上限，与 orders.express_no VARCHAR(50) 对齐 */
+    public static final int EXPRESS_NO_MAX_LENGTH = 50;
+
     private Long id;
     private String orderNo;             // 订单编号
     private Long storeId;               // 所属门店
@@ -18,7 +23,9 @@ public class Order {
     private Long staffId;               // 操作员工ID
     private OrderSource source;         // 门店单 / 网单
     private OrderStatus status;         // 当前状态
-    private BigDecimal totalAmount;     // 总金额
+    private BigDecimal totalAmount;     // 总金额（用券后是**折后应付**）
+    private BigDecimal discountAmount;  // 券抵扣金额（只作展示/对账）
+    private Long couponId;              // 使用的优惠券（coupon_grabs 的那一行）
     private BigDecimal paidAmount;      // 已付金额
     private PayMethod payMethod;        // 支付方式（pay 时填）
     private PayMethod finalPayMethod;   // 最终支付方式（finalPay 时填）
@@ -44,6 +51,10 @@ public class Order {
         this.items = items;
         this.status = OrderStatus.PENDING_PAY;
         this.totalAmount = calcTotalAmount();
+        // 必须是 0 而不是 null：discount_amount 列是 NOT NULL DEFAULT 0.00，
+        // 没券的订单（绝大多数）插进去时带的是这个值。留 null 会撞数据库约束，
+        // 而且是**每一张不带券的订单**都撞
+        this.discountAmount = BigDecimal.ZERO;
         this.paidAmount = BigDecimal.ZERO;
         this.createTime = LocalDateTime.now();
     }
@@ -88,6 +99,68 @@ public class Order {
         this.appointmentTime = appointmentTime;
         this.deliveryAddress = deliveryAddress;
         this.remark = remark;
+    }
+
+    /**
+     * 录入快递单号 —— 只在**网单派送中（6 态）**时填，填完状态不变、仍是 6。
+     *
+     * 为什么守在领域：这是订单自己的不变量（哪张单能寄快递、什么时候能填），
+     * 换任何入口进来都绕不掉（应用层之外还有定时任务、后台脚本、第二个前端）。
+     * 三条规则各有各的必要：
+     *   - 门店单不寄快递（衣服就在店里等顾客来取），给它录单号说明操作的是另一件事
+     *   - 只有派送中能录：单号是"已经在路上了"的凭证 —— 待出厂(4)就录等于提前宣布发货，
+     *     已完成(7)再录是事后补票，两者都会让运单和订单状态对不上
+     *   - 空白串也算没填：前端把输入框的 "   " 原样提交上来是最常见的坏输入
+     *
+     * 长度上限守在领域、**不留给数据库**：express_no 是 VARCHAR(50)，超长会一路
+     * 走到 UPDATE 才被 MySQL 弹回来，报出来的是 DataTooLong 这种英文 SQL 异常（500），
+     * 而不是一句给用户看的话。和 Customer.requireValidName 是同一个理由 ——
+     * 50 这个数字只该有一个家，列加宽时改的是这里
+     */
+    public void fillExpressNo(String expressNo) {
+        if (this.source != OrderSource.ONLINE) {
+            throw new BusinessException("只有网单可以录入快递单号");
+        }
+        if (this.status != OrderStatus.DELIVERING) {
+            throw new BusinessException("只有派送中的订单可以录入快递单号: 状态="
+                    + this.status.getCode());
+        }
+        if (expressNo == null || expressNo.isBlank()) {
+            throw new BusinessException("快递单号不能为空");
+        }
+        if (expressNo.codePointCount(0, expressNo.length()) > EXPRESS_NO_MAX_LENGTH) {
+            throw new BusinessException("快递单号不能超过 " + EXPRESS_NO_MAX_LENGTH + " 个字符");
+        }
+        this.expressNo = expressNo;
+    }
+
+    /**
+     * 应用优惠券 —— 折扣是订单自己的不变量，所以守在领域里，不在应用层。
+     *
+     * **total_amount 存折后应付**（不是折前价）：pay() / updateStatus() / finalPay()
+     * 三处都拿 paid_amount 与 total_amount 比"付清没"，若存折前价，用了券的顾客
+     * 到了收银台会被要求付全款。discount_amount 只作展示与对账，**不参与任何状态判断**。
+     *
+     * 必须在订单**落库之前**调用：构造器算出来的 totalAmount 是折前价，
+     * 折后价只在这里产生 —— 晚了就已经写进库了。
+     */
+    public void applyCoupon(Long couponId, BigDecimal discount) {
+        // 折扣率本该在券域把关，这里再校一次不是重复：领域方法不该假设调用方
+        // 一定校验过（应用层之外还有别的入口），而且"折后应付怎么算"本身是订单的规则
+        if (discount == null || discount.compareTo(BigDecimal.ZERO) <= 0
+                || discount.compareTo(BigDecimal.ONE) > 0) {
+            throw new BusinessException("优惠券折扣率不合法");
+        }
+        if (this.couponId != null) {
+            // 一张订单只挂一张券（coupon_id 是单列）。重复调用会把已经折过的
+            // total_amount 再折一次 —— 静默少收钱，比报错难查得多
+            throw new BusinessException("订单已经使用过优惠券");
+        }
+        BigDecimal before = this.totalAmount;
+        BigDecimal after = before.multiply(discount).setScale(2, RoundingMode.HALF_UP);
+        this.couponId = couponId;
+        this.discountAmount = before.subtract(after);
+        this.totalAmount = after;
     }
 
     /** 记录本次操作的员工（订单留痕：谁推进的状态、谁收的款） */
@@ -186,6 +259,8 @@ public class Order {
     public OrderSource getSource() { return source; }
     public OrderStatus getStatus() { return status; }
     public BigDecimal getTotalAmount() { return totalAmount; }
+    public BigDecimal getDiscountAmount() { return discountAmount; }
+    public Long getCouponId() { return couponId; }
     public BigDecimal getPaidAmount() { return paidAmount; }
     public PayMethod getPayMethod() { return payMethod; }
     public PayMethod getFinalPayMethod() { return finalPayMethod; }
@@ -212,6 +287,9 @@ public class Order {
     public void setStatus(OrderStatus status) { this.status = status; }
     public void setTotalAmount(BigDecimal totalAmount) { this.totalAmount =
             totalAmount; }
+    public void setDiscountAmount(BigDecimal discountAmount) { this.discountAmount =
+            discountAmount; }
+    public void setCouponId(Long couponId) { this.couponId = couponId; }
     public void setPaidAmount(BigDecimal paidAmount) { this.paidAmount = paidAmount;
     }
     public void setPayMethod(PayMethod payMethod) { this.payMethod = payMethod; }

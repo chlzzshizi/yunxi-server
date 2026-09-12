@@ -53,14 +53,17 @@ public class OrderAppService {
     private final PriceRepository priceRepository;
     private final StoreRepository storeRepository;
     private final CustomerRepository customerRepository;
+    private final CouponAppService couponAppService;
 
     /** 构造注入 */
     public OrderAppService(OrderRepository orderRepository, PriceRepository priceRepository,
-                           StoreRepository storeRepository, CustomerRepository customerRepository) {
+                           StoreRepository storeRepository, CustomerRepository customerRepository,
+                           CouponAppService couponAppService) {
         this.orderRepository = orderRepository;
         this.priceRepository = priceRepository;
         this.storeRepository = storeRepository;
         this.customerRepository = customerRepository;
+        this.couponAppService = couponAppService;
     }
 
     // ──────────────── 创建 ────────────────
@@ -73,16 +76,20 @@ public class OrderAppService {
      * @param commands       订单明细（应用层命令对象，不含价格）
      * @param operatorStaffId 操作员工（门店单必填；网单为 null）
      * @param extras         网单要素/备注（可为 OrderExtras.EMPTY）
+     * @param couponId        优惠券（可为 null）。门店单和网单都能用（§5.8）
      *
      * 为什么加 @Transactional：一次建单要写 orders + order_items 两张表，
      * 明细插入失败留下一个"零明细订单"会很难看（也难修）。加事务后要么全成要么全不成。
      * 订单号重试循环在事务内：MySQL 的 InnoDB 只回滚**失败的那条语句**，
      * 事务本身还能继续用，所以撞号重试不会把前面的写入弄成"已回滚"状态。
+     *
+     * **券的核销也在这个事务里**：券 CAS 命中 0 行时抛 409，订单跟着一起回滚 ——
+     * 不会出现"券烧了单没建成"或"单建了券没烧掉"的半截状态。
      */
     @Transactional
     public Result<OrderView> createOrder(Long storeId, Long customerId,
                                          OrderSource source, List<OrderItemCommand> commands,
-                                         Long operatorStaffId, OrderExtras extras) {
+                                         Long operatorStaffId, OrderExtras extras, Long couponId) {
         // 错误一律抛 BusinessException（GlobalExceptionHandler 统一转 Result.fail），
         // 不要在这一层 return Result.fail —— 调用方没法 catch，风格也不统一
         if (commands == null || commands.isEmpty()) {
@@ -114,6 +121,16 @@ public class OrderAppService {
             // lookup-or-create 拿到 id 再建单，两种都是同一个动作出错 —— 重新查一遍
             throw new BusinessException("顾客不存在，请重新查询或建档");
         }
+        // 券的友好校验：能不能用、是不是这位顾客的，用不了就带着具体原因 400。
+        // 放在算价之前（和上面两条同样理由：坏参数先失败，省一次价目表查询）。
+        // 真正的权威判定不在这里，在落库之后那条 CAS —— 这里只是让失败说得清原因。
+        //
+        // 注意校验用的是 couponId 对应的**券**、customerId 对应的**单的顾客**：
+        // 门店单的 customerId 是员工填的，所以"券属于这位顾客"这件事由员工自证，
+        // 拦不住冒用（§5.8 把这条代价写明了）。它的价值是让错误指对方向
+        BigDecimal couponDiscount = couponId == null
+                ? null
+                : couponAppService.resolveDiscount(couponId, customerId);
         // 命令对象 → 领域明细。转换放在"校验之后、算价之前"：
         // 转换里可能要拆箱，先让上面两条校验把空/缺字段的请求挡掉
         List<OrderItem> items = toItems(commands);
@@ -132,8 +149,23 @@ public class OrderAppService {
                 order.fillOrderInfo(extras.appointmentTime(),
                         extras.deliveryAddress(), extras.remark());
             }
+            // 折扣必须在**循环内**打：每次重试都是一张新 new 出来的 Order，
+            // 构造器会按明细重新算一遍折前总价。放到循环外就等于对上一轮那张
+            // （已经丢掉的）对象打了折，重试成功后落库的是一张全价单 ——
+            // 而这种错只出现在撞号的罕见路径上，平时的用例一次都碰不到
+            if (couponDiscount != null) {
+                order.applyCoupon(couponId, couponDiscount);
+            }
             try {
                 orderRepository.save(order);
+                // 核销放在**落库成功之后**，两个独立理由：撞号重试会白白烧掉
+                // 顾客的券；used_order_id 得等订单拿到自增 id 才写得出。
+                // CAS 命中 0 行 → 409 → 整个事务回滚，上面那笔订单跟着消失 ——
+                // 券和订单不会只成一半
+                if (couponDiscount != null) {
+                    couponAppService.consume(couponId, customerId,
+                            order.getId(), operatorStaffId);
+                }
                 return Result.ok(OrderView.from(order));
             } catch (DuplicateKeyException e) {
                 log.warn("订单号冲突（第 {} 次），换号重试: {}", attempt, order.getOrderNo());
@@ -193,7 +225,9 @@ public class OrderAppService {
         return Result.ok(PageResult.of(list, total, safePage, safeSize));
     }
 
-    // ──────────────── 状态操作（仅员工）────────────────
+    // ──────────────── 状态操作 ────────────────
+    //   pay / updateStatus / finalPay / fillExpressNo —— 员工
+    //   onlinePay                                   —— 顾客自助（唯一的顾客侧写操作）
 
     /**
      * 支付 — 先付传全额，洗后付传 0
@@ -228,6 +262,55 @@ public class OrderAppService {
         Order order = load(orderId);
         OrderStatus before = order.getStatus();
         order.finalPay(payMethod);               // 领域规则把关（状态 5/6/7）
+        saveStatusChange(order, before, operatorStaffId);
+        return Result.ok(null);
+    }
+
+    /**
+     * 顾客在线支付 —— 员工 {@link #pay} 的顾客侧对应物（现金/柜台代收仍走 pay）。
+     *
+     * 金额**不由顾客传**：直接取 order.getTotalAmount()。因为 total_amount 存的
+     * 就是折后应付（§5.8），这里天然收的就是正确的钱 —— 这个端点上没有任何一个
+     * 可以被篡改的数字，顾客改不了价，也改不了金额。
+     *
+     * 券也一样碰不到：券在**建单时**就核销掉了，支付这一步只是把钱补上。
+     *
+     * @param customerId 从 token 取的顾客 ID（不是请求体）
+     */
+    public Result<Void> onlinePay(Long orderId, PayMethod payMethod, Long customerId) {
+        requireCustomer(customerId);
+        Order order = load(orderId);                       // 404
+        if (!order.getCustomerId().equals(customerId)) {
+            // 403 而不是 404：这单确实存在，只是不是他的。说清楚比藏起来有用 ——
+            // 藏起来会让"我明明下了这一单"变成一个查不出来的问题
+            throw new BusinessException(403, "无权支付该订单");
+        }
+        // 只认微信/支付宝：这是"顾客自助"能用的支付方式。现金和余额是柜台动作，
+        // 顾客在手机上点不出来 —— 放行的话等于让一张单凭空变成"已在柜台付了现金"
+        if (payMethod != PayMethod.WECHAT && payMethod != PayMethod.ALIPAY) {
+            throw new BusinessException("网单支付方式只支持微信或支付宝");
+        }
+        OrderStatus before = order.getStatus();
+        order.pay(payMethod, order.getTotalAmount());      // 领域规则把关（1 态、金额）
+        // 操作人是顾客，没有 staffId 可记 —— 传 null 表示"不动这一列"（见 saveStatusChange）
+        saveStatusChange(order, before, null);
+        return Result.ok(null);
+    }
+
+    /**
+     * 录入快递单号（仅员工）。
+     *
+     * 状态**不变**（6 → 6），但仍然走同一条 CAS：设计文档 §11.4 要求所有会改
+     * status / paid_amount / pay_method / final_pay_method / staff_id / express_no /
+     * finish_time 的写入都从那一句出去，没有旁路。这次 CAS 还有个实际作用 ——
+     * 一个员工点"录入单号"的同时另一个点了"推进"，后到的那次会命中 0 行拿到 409，
+     * 而不是把单号写到一张已经完成的单上
+     */
+    public Result<Void> fillExpressNo(Long orderId, String expressNo, Long operatorStaffId) {
+        requireStaff(operatorStaffId);
+        Order order = load(orderId);
+        OrderStatus before = order.getStatus();
+        order.fillExpressNo(expressNo);     // 领域规则把关（来源/状态/空值/长度）
         saveStatusChange(order, before, operatorStaffId);
         return Result.ok(null);
     }
@@ -367,7 +450,13 @@ public class OrderAppService {
      * 因为它是一次请求内的临时对象，不会跑到别的地方去。
      */
     private void saveStatusChange(Order order, OrderStatus beforeStatus, Long operatorStaffId) {
-        order.recordOperator(operatorStaffId);
+        // 只有真的有人时才覆盖 staff_id：顾客在线支付传的是 null，而无条件
+        // recordOperator(null) 会把这一列**抹掉** —— 网单上它本来就是 null 无所谓，
+        // 但门店单上那是建单员工，抹掉等于把"谁经手的"这条线索删了。
+        // 对现有四个员工侧调用方来说这个 if 永远为真，行为一个字没变
+        if (operatorStaffId != null) {
+            order.recordOperator(operatorStaffId);
+        }
         boolean updated = orderRepository.updateStatusCas(order, beforeStatus);
         if (!updated) {
             throw new BusinessException(409, "订单状态已被其他人变更，请刷新后重试");
@@ -378,6 +467,13 @@ public class OrderAppService {
     private void requireStaff(Long operatorStaffId) {
         if (operatorStaffId == null) {
             throw new BusinessException(401, "请使用员工账号操作");
+        }
+    }
+
+    /** 顾客自助操作只允许顾客（员工 token 传到这里 customerId 为 null） */
+    private void requireCustomer(Long customerId) {
+        if (customerId == null) {
+            throw new BusinessException(401, "请使用顾客账号登录");
         }
     }
 }
