@@ -2,6 +2,7 @@
 // 员工发券台：发券表单 + 券列表（状态徽章）+ 30s 轮询 + 登出
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { personaPaths } from '../../router'
 import { listCoupons, createCoupon } from '../../api/coupon'
 import { staffLogout } from '../../api/auth'
 import { loadSession, clearSession } from '../../utils/auth'
@@ -96,7 +97,7 @@ async function loadList() {
 async function onLogout() {
   await staffLogout()      // 先让后端把 token 拉黑（要 Authorization 头，auth.js 已带）
   clearSession('staff')
-  router.push('/staff/login')
+  router.push(personaPaths.staff.login)
 }
 
 onMounted(() => {

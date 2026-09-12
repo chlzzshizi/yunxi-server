@@ -70,7 +70,7 @@ public class OrderAppService {
 
     /**
      * 创建订单
-     * @param storeId        归属门店（门店单=员工 token 里的店；网单=下单时选的店）
+     * @param storeId        归属门店（门店单=员工 token 里的店；网单=下单时选的店，**可不选**，则为 null）
      * @param customerId     顾客（门店单=员工输入；网单=顾客 token 身份）
      * @param source         门店单 / 网单
      * @param commands       订单明细（应用层命令对象，不含价格）
@@ -109,7 +109,11 @@ public class OrderAppService {
         // 漏掉门店校验会建出一张"要送到不存在的地方"的网单；
         // 漏掉顾客校验会建出一张挂在幽灵顾客身上的单 —— 它不报错，
         // 但从此所有"按顾客查订单"的地方都会莫名其妙地少一条，极难排查
-        if (source == OrderSource.ONLINE
+        //
+        // 网单的门店**可选**（2026-09-13 口径）：不指定就存 NULL，所以这条是"给了才校"。
+        // null = "顾客没选"，不是"挑了个坏店"，两者必须在判断里分开 —— 混在一起的话，
+        // 不选门店会被报成"门店不存在或已停业"，一句话把顾客指向错误的方向。
+        if (source == OrderSource.ONLINE && storeId != null
                 && storeRepository.findOpenById(storeId).isEmpty()) {
             // 门店不存在 or 已停业，用同一句话：对外都是"这家店现在下不了单"，
             // 顾客不需要（也不该）知道是"没这家店"还是"店关了"

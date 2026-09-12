@@ -217,9 +217,30 @@ class OrderAppServiceTest {
 
     // ════════════════ 网单门店校验 ════════════════
 
+    /**
+     * 门店**可选**（2026-09-13 口径）：不指定就存 NULL，指定了才需要它在营业。
+     * 所以这组用例是"两半"，缺一不可 —— 少了上面那半（null 放行），
+     * 下面那些 400 可能来自"没传门店"而不是"店是坏的"；少了下面那半，
+     * 就可能把校验整个删掉而没人发现。
+     */
     @Nested
-    @DisplayName("网单必须选一个营业中的门店")
+    @DisplayName("网单的门店可选；给了值才需要它是营业中的")
     class OnlineStoreCheck {
+
+        @Test
+        @DisplayName("不指定门店（null）→ 建单成功，storeId 为 null，且一次都没查门店表")
+        void nullStoreAllowed() {
+            // 断言"没查库"比只断言"没抛异常"强：它证明 null 是在判断的第一段就短路了，
+            // 而不是查了一次库、恰好被某个 Optional.empty() 放行 ——
+            // 在这个用例里两者**结果相同**，但一个是"不指定"，另一个是"店不存在也放行"
+            Result<OrderView> result = orderAppService.createOrder(
+                    null, 100L, OrderSource.ONLINE, ITEMS, null, ONLINE_EXTRAS, null);
+
+            assertThat(result.code()).isEqualTo(200);
+            assertThat(result.data().storeId()).isNull();
+            assertThat(result.data().source()).isEqualTo(OrderSource.ONLINE);
+            verify(storeRepository, never()).findOpenById(any());
+        }
 
         @Test
         @DisplayName("选了不存在/已停业的门店（999）→ 400，不落库")

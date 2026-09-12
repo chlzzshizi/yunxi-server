@@ -446,6 +446,35 @@ check "I10 门店单录单号 → 400 只有网单（衣服在店里等顾客来
      -H "Authorization: Bearer $MGR_T")" "只有网单"
 
 echo
+echo "########## J. 网单门店可选（2026-09-13 口径）##########"
+# 新口径：顾客**可以不选**门店，不选就存 NULL。所以这一节是成对的"两半" ——
+# 少了 J1（null 放行），J3 那个 400 可能来自"没传门店"而不是"店是坏的"；
+# 少了 J3，把 if 条件写成永假也能让 J1 通过（校验整个被删掉没人发现）
+
+# storeId 显式传 null，而不是省略这个键：两者对后端等价，但显式写出来
+# 才是"我确实没选"，也让这条用例的意图在脚本里自解释
+J_NULL=$(curl -s -X POST $BASE/api/orders -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $CUST1" \
+  -d '{"source":2,"storeId":null,"deliveryAddress":"Hangzhou Xihu Rd 200","items":[{"categoryId":11,"washTypeId":1,"quantity":1}]}')
+J_NULL_ID=$(jqf "$J_NULL" id)
+
+check "J1 网单不指定门店 → 200（在线顾客本来就没有门店归属）" "$J_NULL" '"code":200'
+check "J2 库里 store_id 是 NULL，订单本身照常落库（15.00，1 态待支付）" \
+  "$(db "select concat_ws('|',ifnull(store_id,'NULL'),source,status,total_amount) from orders where id=$J_NULL_ID;")" \
+  "NULL|2|1|15.00"
+
+# J1 的反证：校验只是改成"给了才校"，没有被整个删掉
+check "J3 指定一个不存在/已停业的门店（999）→ 400" \
+  "$(curl -s -X POST $BASE/api/orders -H "Content-Type: application/json" \
+     -H "Authorization: Bearer $CUST1" \
+     -d '{"source":2,"storeId":999,"deliveryAddress":"Hangzhou Xihu Rd 300","items":[{"categoryId":11,"washTypeId":1,"quantity":1}]}')" \
+  "门店不存在或已停业"
+
+# 门店单不受影响：它的门店取自店长 token，永远有值（口径变更只动了网单那一支）
+check "J4 门店单的 store_id 仍然落在店长自己那家店（1）" \
+  "$(db "select ifnull(store_id,'NULL') from orders where id=$ORDER1_ID;")" "1"
+
+echo
 echo "================================"
 echo "  通过 $PASS 项，失败 $FAIL 项"
 echo "================================"

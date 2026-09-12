@@ -24,3 +24,14 @@ export function grabCoupon(couponId) {
     persona: 'customer',
   })
 }
+
+/**
+ * 我的券 —— 顾客侧下单页选券用。
+ * @returns [{grabId, couponId, name, discount, startTime, endTime, grabTime, expired}]
+ *
+ * 只含**未使用**的券；过期的也返回，带 `expired: true` —— 前端**置灰**而不是
+ * 让它凭空消失。"我抢的券去哪了"比"这里本来就没有东西"好回答得多。
+ */
+export function listMyCoupons() {
+  return request('/api/coupons/mine', { persona: 'customer' })
+}

@@ -7,6 +7,10 @@ import { loadSession } from '../utils/auth'
 // 守卫只做"本地会话在不在"的粗判断；token 是否真有效由后端 401 说了算
 // （request.js 收到 401 会清会话并再跳一次登录页）
 
+// 角色不进路由：管理员能登录，但后端按 URL 前缀把整个 /api/orders 都 403 了。
+// 前端不按 role 藏按钮 —— 藏了也只是"少点一次"，真拦人靠后端；而且 JWT 里
+// 的 role 一旦和服务端口径不一致，藏按钮反而会变成"店长看不到自己的功能"
+
 const routes = [
   { path: '/', name: 'home', component: () => import('../views/HomeView.vue') },
   {
@@ -14,6 +18,30 @@ const routes = [
     name: 'staffLogin',
     component: () => import('../views/staff/StaffLoginView.vue'),
     meta: { persona: 'staff', guest: true },
+  },
+  {
+    path: '/staff/orders',
+    name: 'staffOrders',
+    component: () => import('../views/staff/StaffOrderListView.vue'),
+    meta: { persona: 'staff' },
+  },
+  {
+    path: '/staff/orders/new',
+    name: 'staffOrderCreate',
+    component: () => import('../views/staff/StaffOrderCreateView.vue'),
+    meta: { persona: 'staff' },
+  },
+  {
+    path: '/staff/orders/:id',
+    name: 'staffOrderDetail',
+    component: () => import('../views/staff/StaffOrderDetailView.vue'),
+    meta: { persona: 'staff' },
+  },
+  {
+    path: '/staff/prices',
+    name: 'staffPrices',
+    component: () => import('../views/staff/StaffPriceView.vue'),
+    meta: { persona: 'staff' },
   },
   {
     path: '/staff/coupons',
@@ -28,6 +56,24 @@ const routes = [
     meta: { persona: 'customer', guest: true },
   },
   {
+    path: '/customer/orders/new',
+    name: 'customerOrderCreate',
+    component: () => import('../views/customer/CustomerOrderCreateView.vue'),
+    meta: { persona: 'customer' },
+  },
+  {
+    path: '/customer/orders',
+    name: 'customerOrders',
+    component: () => import('../views/customer/CustomerOrderListView.vue'),
+    meta: { persona: 'customer' },
+  },
+  {
+    path: '/customer/orders/:id',
+    name: 'customerOrderDetail',
+    component: () => import('../views/customer/CustomerOrderDetailView.vue'),
+    meta: { persona: 'customer' },
+  },
+  {
     path: '/customer/home',
     name: 'customerHome',
     component: () => import('../views/customer/CustomerHomeView.vue'),
@@ -36,10 +82,12 @@ const routes = [
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
-// persona → 登录页 / 主页 路径
+// persona → 登录页 / 主页 路径。
+// 员工主页从 /staff/coupons 改成 /staff/orders：订单是店长的**日常**，
+// 发券台是偶尔用一次的活动页。登录后落到"每天都要开的那一页"
 export const personaPaths = {
-  staff: { login: '/staff/login', home: '/staff/coupons' },
-  customer: { login: '/customer/auth', home: '/customer/home' },
+  staff: { login: '/staff/login', home: '/staff/orders' },
+  customer: { login: '/customer/auth', home: '/customer/orders' },
 }
 
 const router = createRouter({

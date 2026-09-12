@@ -80,10 +80,11 @@ public class OrderController {
         } else {
             // 网单：顾客自助下单，顾客 = token 身份（请求体里的 customerId 忽略）
             customerId = requireCustomer(http);
+            // 门店**可选**（2026-09-13 口径）：不传就是不指定，存 NULL。
+            // 这里不拦 null —— 在线顾客本来就没有门店归属（§4.4：网单顾客
+            // customers.store_id 为 NULL），却必须替订单挑一家店，说不通。
+            // 传了值才需要回库确认它在营业，那条校验在应用层（要查库）
             storeId = request.storeId();
-            if (storeId == null) {
-                return Result.fail(400, "网单必须指定门店 storeId");
-            }
         }
 
         // ── 接口层 DTO → 应用层命令对象（单价不传，由 OrderAppService 查价目表补）──

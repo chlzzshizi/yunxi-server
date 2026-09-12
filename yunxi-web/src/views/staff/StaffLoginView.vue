@@ -1,7 +1,11 @@
 <script setup>
-// 员工登录页 —— 成功即存 staff 槽位会话并进发券台
+// 员工登录页 —— 成功即存 staff 槽位会话并进员工主页
+//
+// 落地页从 personaPaths 取，**不写死**：这个决定（登录后落到哪一页）只有一个家，
+// 写死一份在这里，改路由时就会漏掉这处 —— 和路由守卫里的那份对不上
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { personaPaths } from '../../router'
 import { staffLogin } from '../../api/auth'
 import { saveSession } from '../../utils/auth'
 
@@ -21,7 +25,7 @@ async function onSubmit() {
   try {
     const token = await staffLogin(username.value.trim(), password.value)
     saveSession('staff', token) // 登录成功才算数：token 存进 staff 槽
-    router.push('/staff/coupons')
+    router.push(personaPaths.staff.home)
   } catch (e) {
     error.value = e.message // 401 密码错 / 403 停用 / 0 网络 —— 全部就地展示
   } finally {

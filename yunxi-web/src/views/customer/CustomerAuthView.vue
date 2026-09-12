@@ -1,7 +1,10 @@
 <script setup>
 // 顾客登录 | 注册 —— 注册即登录（后端直接返回 token），两模式共用一个卡片
+//
+// 落地页从 personaPaths 取，**不写死** —— 理由同员工登录页
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { personaPaths } from '../../router'
 import { customerLogin, customerRegister } from '../../api/auth'
 import { saveSession } from '../../utils/auth'
 
@@ -32,7 +35,7 @@ async function onSubmit() {
       ? await customerRegister({ name: name.value.trim(), phone: phone.value.trim(), password: password.value })
       : await customerLogin(phone.value.trim(), password.value)
     saveSession('customer', token)
-    router.push('/customer/home')
+    router.push(personaPaths.customer.home)
   } catch (e) {
     // 401 密码错 / 400 已注册 / 0 网络 —— 就地展示，绝不跳转
     error.value = e.message

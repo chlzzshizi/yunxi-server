@@ -2,6 +2,7 @@
 // 顾客领券中心：券卡片列表 + 抢券 + 30s 轮询 + 退出（后端无顾客登出接口 → 只清本地）
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { personaPaths } from '../../router'
 import { listCoupons, grabCoupon } from '../../api/coupon'
 import { loadSession, clearSession } from '../../utils/auth'
 import { fmtTime, fmtDiscount, STATUS_BADGE } from '../../utils/format'
@@ -69,7 +70,7 @@ async function onGrab(c) {
 
 function onLogout() {
   clearSession('customer') // 只清 token；已抢记忆保留，重新登录同一账号仍是"已抢到"
-  router.push('/customer/auth')
+  router.push(personaPaths.customer.login)
 }
 
 // 按钮文案与可用性：状态 2 进行中且没抢过 → 可抢
