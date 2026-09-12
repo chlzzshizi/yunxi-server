@@ -265,6 +265,14 @@ if [ "$S2_ADDR" != "$STORE2_ADDR" ]; then
   echo "              期望 '$STORE2_ADDR'"
   echo "              实际 '$S2_ADDR'（乱码说明插入时被转码了）"; exit 1
 fi
+# 二店店长同理。这条原先没有：name 有自愈语句所以一直是好的，但**没有断言** ——
+# "有自愈、没断言"离"没自愈、没断言"只差一步，那一步就是某次改动顺手删掉 update
+S99_NAME=$(db "select name from staff where id=99;")
+if [ "$S99_NAME" != "二店店长" ]; then
+  echo "==> [准备失败] mgr2 (staff id=99) 的 name 字节不对"
+  echo "              期望 '二店店长'"
+  echo "              实际 '$S99_NAME'（乱码说明插入时被转码了）"; exit 1
+fi
 
 MGR2_RESP=$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
   -d '{"username":"mgr2","password":"admin123"}')

@@ -59,16 +59,33 @@ echo "########## 准备：脚手架 ##########"
 
 # 停用账号（status=0）。密码哈希是 admin123 的 BCrypt——这里必须写死在 SQL 里，
 # 因为要的就是"账号密码都对、但被停用"这个组合
-docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -e \
-  "insert ignore into staff (id,username,password,name,role,store_id,status)
-   values (98,'mgr_disabled','\$2a\$10\$fEzKJTH469Zd9GB0CKMLseS/iFVndCGene.WQiQ53Q/isi2yZa5oS','停用店长',1,1,0);
+#
+# SQL 走 stdin 而不是 -e（2026-09-13 改，见 Bug 30）：这一行里有中文（'停用店长'），
+# 而中文一旦进 `-e "…"` 就会被转两次码 —— MSYS2 先把命令行参数转成 GBK，latin1 的
+# mysql 客户端再转一道，落库就是双重编码的乱码。这里原先还**漏了**
+# --default-character-set=utf8mb4，两个坑一起踩：staff id=98 的名字从建出来那天
+# 就是乱的，而且没有任何断言看它，所以乱着也没人喊（和 Bug 24 同形状，当时只修了别的脚本）
+STAFF_DISABLED_NAME="停用店长"
+printf '%s\n' "insert ignore into staff (id,username,password,name,role,store_id,status)
+   values (98,'mgr_disabled','\$2a\$10\$fEzKJTH469Zd9GB0CKMLseS/iFVndCGene.WQiQ53Q/isi2yZa5oS','$STAFF_DISABLED_NAME',1,1,0);
+   update staff set name='$STAFF_DISABLED_NAME' where id=98;
    insert ignore into customers (name,phone,password) values ('WalkIn','$PHONE_NOPWD',null);
-   update customers set password=null where phone='$PHONE_NOPWD';" 2>/dev/null
+   update customers set password=null where phone='$PHONE_NOPWD';" \
+  | docker exec -i yunxi-mysql mysql -uroot -pqwaszx123 yunxi \
+           --default-character-set=utf8mb4 2>/dev/null
 
 # 准备阶段守卫（Bug 22 教训）：前置条件不成立就立刻停，别让它继续跑成断言失败
 D_STATUS=$(db "select status from staff where username='mgr_disabled';")
 if [ "$D_STATUS" != "0" ]; then
   echo "==> [准备失败] mgr_disabled 的 status 应为 0，实际 '$D_STATUS'"; exit 1
+fi
+# 名字的字节也必须盯住。这条原先没有 —— 而"没有断言看着的中文列"正是会静悄悄烂掉的列：
+# 乱码不报错、不影响 A5（停用账号的登录被拒和名字无关），只会一直躺在库里等人肉眼撞见
+D_NAME=$(db "select name from staff where username='mgr_disabled';")
+if [ "$D_NAME" != "$STAFF_DISABLED_NAME" ]; then
+  echo "==> [准备失败] mgr_disabled 的名字字节不对"
+  echo "              期望 '$STAFF_DISABLED_NAME'"
+  echo "              实际 '$D_NAME'（乱码说明插入时被转码了）"; exit 1
 fi
 NP_PWD=$(db "select ifnull(password,'<NULL>') from customers where phone='$PHONE_NOPWD';")
 if [ "$NP_PWD" != "<NULL>" ]; then
