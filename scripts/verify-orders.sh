@@ -231,15 +231,40 @@ echo "########## F. 跨店不隔离：所有店长管所有订单（§4.2）####
 # SQL 走 stdin 而不是 -e：`-e "…二号门店…"` 里的中文会先被 MSYS2 转成 GBK
 # （命令行参数跨进程边界就会转），再被 latin1 的 mysql 客户端转一道 ——
 # 库里存下来的是**双重编码的乱码**。insert ignore 遇到已存在的 id 什么都不做，
-# 所以那行乱码永远不会自愈 —— 只能靠下面那句 update 把它写回正确字节。
+# 所以那行乱码永远不会自愈 —— 只能靠下面的 update 把它写回正确字节。
 # 这两句话是 2026-09-12 查库时才发现的：F 段一直全绿，因为它只看订单不看店名
-printf '%s\n' "insert ignore into stores (id,name,address) values (2,'二号门店','验收用');
-update stores set name='二号门店' where id=2;
+#
+# 2026-09-13 补：那句 update 原先只写 name，而这行 insert 里有**两个**中文列 ——
+# 于是 address 的乱码从 09-12 一直留到 09-13（在门店列表里肉眼可见）。
+# 根因一句话：**自愈只修了"有断言盯着的那一列"** —— name 有 verify-stores 的
+# 守卫看着，address 没人看，所以它乱着也没人喊。修法是两件事一起做：整行写回 + 整行断言
+STORE2_NAME="二号门店"
+STORE2_ADDR="验收用"
+printf '%s\n' "insert ignore into stores (id,name,address) values (2,'$STORE2_NAME','$STORE2_ADDR');
+update stores set name='$STORE2_NAME', address='$STORE2_ADDR' where id=2;
 insert ignore into staff (id,username,password,name,role,store_id,status)
 values (99,'mgr2','\$2a\$10\$fEzKJTH469Zd9GB0CKMLseS/iFVndCGene.WQiQ53Q/isi2yZa5oS','二店店长',1,2,1);
 update staff set name='二店店长' where id=99;" > "$TMP/scaffold-orders.sql"
 docker exec -i yunxi-mysql mysql -uroot -pqwaszx123 yunxi \
        --default-character-set=utf8mb4 < "$TMP/scaffold-orders.sql"
+
+# 准备守卫（Bug 22 教训：前置条件不成立就立刻停，别让它跑成后面某个断言失败）。
+# 注意这两条**不是**在验上面那句 update 写对了没 —— 它刚写完，读出来当然是对的。
+# 它们验的是**写进去的那条路**（printf → 文件 → stdin → mysql 客户端）有没有在哪
+# 一段被转码。少了它们，同一个坑会以"这次换了一列"的形式再犯一次：
+# 乱码本身不报错、不影响 F 段的任何断言，只会安安静静躺在库里等人肉眼撞见
+S2_NAME=$(db "select name from stores where id=2;")
+if [ "$S2_NAME" != "$STORE2_NAME" ]; then
+  echo "==> [准备失败] 二店 id=2 的 name 字节不对"
+  echo "              期望 '$STORE2_NAME'"
+  echo "              实际 '$S2_NAME'（乱码说明插入时被转码了）"; exit 1
+fi
+S2_ADDR=$(db "select address from stores where id=2;")
+if [ "$S2_ADDR" != "$STORE2_ADDR" ]; then
+  echo "==> [准备失败] 二店 id=2 的 address 字节不对"
+  echo "              期望 '$STORE2_ADDR'"
+  echo "              实际 '$S2_ADDR'（乱码说明插入时被转码了）"; exit 1
+fi
 
 MGR2_RESP=$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
   -d '{"username":"mgr2","password":"admin123"}')

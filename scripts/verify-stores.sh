@@ -118,6 +118,7 @@ dbFile() { printf '%s\n' "$1" > "$TMP/scaffold.sql"
 STORE_OPEN=1                       # V4 种子里的云洗中央门店
 STORE_CLOSED_ID=99                 # 脚手架：一家停业的店
 STORE_CLOSED_NAME="云洗停业测试店"
+STORE_CLOSED_ADDR="杭州市余杭区测试路 1 号"
 STORE_GHOST=999                    # 根本不存在的门店
 CUSTOMER_GHOST=999                 # 根本不存在的顾客
 
@@ -145,9 +146,14 @@ echo "########## 准备：脚手架 ##########"
 # 库里那一行是**双重编码的乱码**（GBK 转码的产物）。insert ignore 遇到已存在的
 # id 什么都不做，于是乱码会一直留着 —— 而乱码恰好让 A3 通过（列表里当然找不到
 # 一个正确写法的店名）。修字节是让 A3 恢复意义的前提
+#
+# 2026-09-13 补：那句 update 原先只写 name，而 insert 里有**两个**中文列 ——
+# address 的乱码就这样留了四天（store id=2 同一个毛病，见 verify-orders.sh 的 F 段）。
+# **自愈只修了"有断言盯着的那一列"**，所以修法必须成对：整行写回 + 整行断言
 dbFile "insert ignore into stores (id,name,address,phone,status)
-        values ($STORE_CLOSED_ID,'$STORE_CLOSED_NAME','杭州市余杭区测试路 1 号','0571-00000000',0);
-        update stores set name='$STORE_CLOSED_NAME' where id=$STORE_CLOSED_ID;"
+        values ($STORE_CLOSED_ID,'$STORE_CLOSED_NAME','$STORE_CLOSED_ADDR','0571-00000000',0);
+        update stores set name='$STORE_CLOSED_NAME', address='$STORE_CLOSED_ADDR'
+        where id=$STORE_CLOSED_ID;"
 
 # 准备阶段守卫（Bug 22 教训）：前置条件不成立就立刻停，别让它继续跑成断言失败
 C_STATUS=$(db "select status from stores where id=$STORE_CLOSED_ID;")
@@ -162,6 +168,14 @@ if [ "$C_NAME" != "$STORE_CLOSED_NAME" ]; then
   echo "==> [准备失败] 停业店 id=$STORE_CLOSED_ID 的名字字节不对"
   echo "              期望 '$STORE_CLOSED_NAME'"
   echo "              实际 '$C_NAME'（乱码说明插入时被转码了）"; exit 1
+fi
+# 地址同理。这条原先没有 —— 于是 address 的乱码在库里躺了四天没人喊。
+# name 会自愈纯属侥幸：恰好有个断言在它身上。**没有断言的中文列 = 会静悄悄烂掉的列**
+C_ADDR=$(db "select address from stores where id=$STORE_CLOSED_ID;")
+if [ "$C_ADDR" != "$STORE_CLOSED_ADDR" ]; then
+  echo "==> [准备失败] 停业店 id=$STORE_CLOSED_ID 的地址字节不对"
+  echo "              期望 '$STORE_CLOSED_ADDR'"
+  echo "              实际 '$C_ADDR'（乱码说明插入时被转码了）"; exit 1
 fi
 O_STATUS=$(db "select status from stores where id=$STORE_OPEN;")
 if [ "$O_STATUS" != "1" ]; then
