@@ -64,9 +64,9 @@ echo "  cust1  token: ${CUST1:0:20}..."
 echo "  cust2  token: ${CUST2:0:20}..."
 
 # 顾客 id（从 orders 建单需要 customerId）—— 直接查库拿，避免再调接口
-CUST1_ID=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N -e \
+CUST1_ID=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N --default-character-set=utf8mb4 -e \
   "select id from customers where phone='13900000001';" 2>/dev/null | tr -d '\r')
-CUST2_ID=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N -e \
+CUST2_ID=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N --default-character-set=utf8mb4 -e \
   "select id from customers where phone='13900000002';" 2>/dev/null | tr -d '\r')
 echo "  cust1 id=$CUST1_ID  cust2 id=$CUST2_ID"
 
@@ -188,7 +188,7 @@ check "D2 已支付再支付 → 拦截" \
 check "D3 推进 2→3 → 200" \
   "$(curl -s -X POST "$BASE/api/orders/$ORDER1_ID/next" -H "Authorization: Bearer $MGR_T")" '"code":200'
 
-DB_STATUS=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N -e \
+DB_STATUS=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N --default-character-set=utf8mb4 -e \
   "select status from orders where id=$ORDER1_ID;" 2>/dev/null | tr -d '\r')
 check "D4 数据库状态真的变成 3（CAS 的 SQL 生效）" "$DB_STATUS" "3"
 
@@ -224,10 +224,19 @@ check "E6 顾客A 查顾客B 的订单详情 → 403" \
 echo
 echo "########## F. 跨店不隔离：所有店长管所有订单（§4.2）##########"
 # 造第二个门店 + 店长（直接用 SQL，属于验收脚手架）
-docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -e \
-  "insert ignore into stores (id,name,address) values (2,'二号门店','验收用');
-   insert ignore into staff (id,username,password,name,role,store_id,status)
-   values (99,'mgr2','\$2a\$10\$fEzKJTH469Zd9GB0CKMLseS/iFVndCGene.WQiQ53Q/isi2yZa5oS','二店店长',1,2,1);" 2>/dev/null
+#
+# SQL 走 stdin 而不是 -e：`-e "…二号门店…"` 里的中文会先被 MSYS2 转成 GBK
+# （命令行参数跨进程边界就会转），再被 latin1 的 mysql 客户端转一道 ——
+# 库里存下来的是**双重编码的乱码**。insert ignore 遇到已存在的 id 什么都不做，
+# 所以那行乱码永远不会自愈 —— 只能靠下面那句 update 把它写回正确字节。
+# 这两句话是 2026-09-12 查库时才发现的：F 段一直全绿，因为它只看订单不看店名
+printf '%s\n' "insert ignore into stores (id,name,address) values (2,'二号门店','验收用');
+update stores set name='二号门店' where id=2;
+insert ignore into staff (id,username,password,name,role,store_id,status)
+values (99,'mgr2','\$2a\$10\$fEzKJTH469Zd9GB0CKMLseS/iFVndCGene.WQiQ53Q/isi2yZa5oS','二店店长',1,2,1);
+update staff set name='二店店长' where id=99;" > "$TMP/scaffold-orders.sql"
+docker exec -i yunxi-mysql mysql -uroot -pqwaszx123 yunxi \
+       --default-character-set=utf8mb4 < "$TMP/scaffold-orders.sql"
 
 MGR2_RESP=$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
   -d '{"username":"mgr2","password":"admin123"}')
@@ -238,7 +247,7 @@ check "F1 二店店长查一店订单 → 200（跨店可查）" \
   "$(curl -s "$BASE/api/orders/$ORDER1_ID" -H "Authorization: Bearer $MGR2_T")" '"code":200'
 
 # 用订单号而不是 id 判断"列表里有这一单"：id 是数字，会误匹配到别的 id 前缀
-ORDER1_NO=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N -e \
+ORDER1_NO=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N --default-character-set=utf8mb4 -e \
   "select order_no from orders where id=$ORDER1_ID;" 2>/dev/null | tr -d '\r')
 check "F2 二店店长列表里有一店的单（不再按店过滤）" \
   "$(curl -s "$BASE/api/orders?page=1&pageSize=20" -H "Authorization: Bearer $MGR2_T")" \
@@ -249,7 +258,7 @@ echo "########## G. 数据完整性 ##########"
 # "袖口有污渍" 的 UTF-8 首字节是 E8A296（袖）；控制台显示 ????? 只是 Git Bash 编码，
 # 数据库里存的必须是真 UTF-8 字节，否则就是真存坏了
 check "G1 中文备注没存坏（查真实字节而不是看控制台乱码）" \
-  "$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N -e \
+  "$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N --default-character-set=utf8mb4 -e \
      "select hex(remark) from orders where id=$ORDER1_ID;" 2>/dev/null)" \
   "E8A296"
 

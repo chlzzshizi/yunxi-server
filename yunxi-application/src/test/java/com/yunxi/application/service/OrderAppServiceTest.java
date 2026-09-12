@@ -9,6 +9,8 @@ import com.yunxi.common.enums.OrderSource;
 import com.yunxi.common.enums.OrderStatus;
 import com.yunxi.common.enums.PayMethod;
 import com.yunxi.common.Result;
+import com.yunxi.domain.customer.Customer;
+import com.yunxi.domain.customer.CustomerRepository;
 import com.yunxi.domain.order.Order;
 import com.yunxi.domain.order.OrderItem;
 import com.yunxi.domain.order.OrderRepository;
@@ -16,6 +18,8 @@ import com.yunxi.domain.price.ClothesCategory;
 import com.yunxi.domain.price.ClothesPrice;
 import com.yunxi.domain.price.PriceRepository;
 import com.yunxi.domain.price.WashType;
+import com.yunxi.domain.store.Store;
+import com.yunxi.domain.store.StoreRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -56,11 +60,21 @@ class OrderAppServiceTest {
 
     private OrderRepository orderRepository;
     private PriceRepository priceRepository;
+    private StoreRepository storeRepository;
+    private CustomerRepository customerRepository;
     private OrderAppService orderAppService;
 
     private static final BigDecimal TOTAL = new BigDecimal("30.00");
     private static final Long STORE_A = 1L;
     private static final Long STORE_B = 2L;
+    /** 门店单里员工填的顾客 id —— 现有用例里的 100L 都是它 */
+    private static final Long CUSTOMER = 100L;
+    /** 网单的配送地址 —— 网单必填，所以每个网单用例都得带上一个 */
+    private static final String ADDRESS = "杭州市西湖区文一西路 100 号";
+
+    /** 网单的一份合法 extras：有地址（网单没地址会被领域层挡下，那是另一组用例的事） */
+    private static final OrderExtras ONLINE_EXTRAS =
+            new OrderExtras(null, ADDRESS, null);
 
     /** 一条明细：2 件衬衫（价目表里的 15.00/件 → 总价 30.00）。命令对象不带价 */
     private static final List<OrderItemCommand> ITEMS = List.of(
@@ -70,7 +84,10 @@ class OrderAppServiceTest {
     void setUp() {
         orderRepository = mock(OrderRepository.class);
         priceRepository = mock(PriceRepository.class);
-        orderAppService = new OrderAppService(orderRepository, priceRepository);
+        storeRepository = mock(StoreRepository.class);
+        customerRepository = mock(CustomerRepository.class);
+        orderAppService = new OrderAppService(
+                orderRepository, priceRepository, storeRepository, customerRepository);
         // CAS 更新默认"成功"（Mockito 对 boolean 默认返回 false，
         // 不显式打桩的话每个状态操作测试都会撞上 409）
         when(orderRepository.updateStatusCas(any(), any())).thenReturn(true);
@@ -78,6 +95,31 @@ class OrderAppServiceTest {
         // 价目表里这个组合 = 15.00 —— 与 ITEMS 的"2 件 × 15.00 = 总价 30.00"对齐
         when(priceRepository.findPricesByCategoryIds(any())).thenReturn(Map.of(
                 1L, List.of(new ClothesPrice(1L, 1L, new BigDecimal("15.00")))));
+        // STORE_A 存在且营业中。只桩这一个 —— 别的 storeId（如 999）
+        // 会拿到 Mockito 对 Optional 的默认返回值 empty()，正好就是"门店不存在"
+        when(storeRepository.findOpenById(STORE_A)).thenReturn(Optional.of(store(STORE_A)));
+        // 现有用例的门店单顾客一律是 100L：桩它存在，让"回库查了且放行"这条路走得通。
+        // 别的 id（如 999）会拿到 Mockito 对 Optional 的默认返回值 empty()，正好就是
+        // "查无此人" —— 和上面只桩 STORE_A 是同一个手法，不桩的那一半自动是坏数据
+        when(customerRepository.findById(CUSTOMER))
+                .thenReturn(Optional.of(customer(CUSTOMER)));
+    }
+
+    /** 一个营业中的门店（Store 只有 setter，没有构造器） */
+    private static Store store(Long id) {
+        Store s = new Store();
+        s.setId(id);
+        s.setName("云洗中央门店");
+        return s;
+    }
+
+    /** 一个已建档的顾客（Customer 只有 setter，没有构造器） */
+    private static Customer customer(Long id) {
+        Customer c = new Customer();
+        c.setId(id);
+        c.setPhone("13700000001");
+        c.setName("张三");
+        return c;
     }
 
     /** 造一个已落库的门店单（含 ID） */
@@ -133,8 +175,9 @@ class OrderAppServiceTest {
         @Test
         @DisplayName("网单：没有操作员工也合法（staffId 保持 null）")
         void onlineOrderNeedsNoStaff() {
+            // extras 必须带地址 —— 网单没地址连 Order 都建不出来（见 OnlineDeliveryAddress）
             Result<OrderView> result = orderAppService.createOrder(
-                    STORE_A, 100L, OrderSource.ONLINE, items, null, OrderExtras.EMPTY);
+                    STORE_A, 100L, OrderSource.ONLINE, items, null, ONLINE_EXTRAS);
 
             assertThat(result.code()).isEqualTo(200);
             assertThat(result.data().staffId()).isNull();
@@ -150,6 +193,105 @@ class OrderAppServiceTest {
                     .hasMessageContaining("至少需要一条明细");
 
             verify(orderRepository, never()).save(any());
+        }
+    }
+
+    // ════════════════ 网单门店校验 ════════════════
+
+    @Nested
+    @DisplayName("网单必须选一个营业中的门店")
+    class OnlineStoreCheck {
+
+        @Test
+        @DisplayName("选了不存在/已停业的门店（999）→ 400，不落库")
+        void unknownStoreRejected() {
+            // 999 没打桩：Mockito 对 Optional 默认返回 empty()，
+            // 正好等于"没这家店"，也等于"店存在但已停业"—— 仓储的 SQL 把两者过滤成了一件事
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    999L, 100L, OrderSource.ONLINE, ITEMS, null, ONLINE_EXTRAS))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("门店不存在或已停业");
+
+            verify(orderRepository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("校验在算价之前 —— 店都选错了就别白查一次价目表")
+        void storeCheckedBeforePricing() {
+            // extras 带上了**合法**地址：这组用例要证明的是门店校验，不是地址校验。
+            // 地址留空的话它照样会抛 400 —— 但那是另一条规则抛的，这条用例就变成
+            // "测了地址"还自称测了门店（断言过的理由必须也是被测的那个）
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    999L, 100L, OrderSource.ONLINE, ITEMS, null, ONLINE_EXTRAS))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("门店");
+
+            verify(priceRepository, never()).findPricesByCategoryIds(any());
+        }
+
+        @Test
+        @DisplayName("门店单不查门店表 —— storeId 来自员工 token，是服务器签发的，不用回库再问一遍")
+        void storeOrderSkipsStoreLookup() {
+            orderAppService.createOrder(
+                    STORE_A, 100L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY);
+
+            verify(storeRepository, never()).findOpenById(any());
+        }
+    }
+
+    // ════════════════ 门店单顾客校验 ════════════════
+
+    /**
+     * 和上一组严格对称：那边守网单的 storeId，这边守门店单的 customerId ——
+     * 判据都是"这个值是不是请求体来的"。orders 对这两列都没有外键，代码是唯一防线。
+     */
+    @Nested
+    @DisplayName("门店单必须挂在一个真实存在的顾客上")
+    class StoreCustomerCheck {
+
+        @Test
+        @DisplayName("customerId 查无此人（999）→ 400，不落库")
+        void unknownCustomerRejected() {
+            // 999 没打桩 → Mockito 对 Optional 默认返回 empty()，正好是"查无此人"。
+            // 不拦的话会建出一张挂在幽灵顾客身上的单：它不报错，但从此所有
+            // "按顾客查订单"的地方都会莫名其妙地少一条，而且没有外键能帮你找回来
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    STORE_A, 999L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("顾客不存在");
+
+            verify(orderRepository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("顾客校验在算价之前 —— 人都没对上就别白查一次价目表")
+        void customerCheckedBeforePricing() {
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    STORE_A, 999L, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("顾客");
+
+            verify(priceRepository, never()).findPricesByCategoryIds(any());
+        }
+
+        @Test
+        @DisplayName("顾客存在 → 照常建单（校验没有误伤正常路径）")
+        void knownCustomerPasses() {
+            Result<OrderView> result = orderAppService.createOrder(
+                    STORE_A, CUSTOMER, OrderSource.STORE, ITEMS, 9L, OrderExtras.EMPTY);
+
+            assertThat(result.code()).isEqualTo(200);
+            verify(customerRepository).findById(CUSTOMER);
+            verify(orderRepository).save(any());
+        }
+
+        @Test
+        @DisplayName("网单不查顾客表 —— customerId 取自顾客 token，服务器签发的，不用回库再问一遍")
+        void onlineOrderSkipsCustomerLookup() {
+            orderAppService.createOrder(
+                    STORE_A, CUSTOMER, OrderSource.ONLINE, ITEMS, null, ONLINE_EXTRAS);
+
+            verify(customerRepository, never()).findById(any());
         }
     }
 

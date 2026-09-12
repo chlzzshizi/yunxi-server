@@ -27,24 +27,44 @@ public class CustomerAuthAppService {
 
     /**
      * 注册 —— 成功即登录，返回足以签 token 的身份。
+     *
+     * **只要手机号 + 密码**（2026-09-12 口径）：线上注册不填姓名。
+     * 名字的来源分两条，各自都说得通：网单顾客线上注册时没有名字（确实不知道他是谁），
+     * 后来到店时由店员在柜台建档补上（见 CustomerAppService）；门店单顾客
+     * 本来就是店员面对面建档的，姓名必填。DDL 上 name 可空（V9）。
      */
-    public Result<CustomerIdentity> register(String name, String phone, String password) {
+    public Result<CustomerIdentity> register(String phone, String password) {
         // 1. 空值校验（不校验的话 password 为 null 会一路传到 BCrypt 里炸掉）
-        if (name == null || name.isBlank()
-                || phone == null || phone.isBlank()
+        if (phone == null || phone.isBlank()
                 || password == null || password.isBlank()) {
-            return Result.fail(400, "姓名、手机号、密码不能为空");
+            return Result.fail(400, "手机号和密码不能为空");
         }
-        // 2. 手机号查重 —— 这只是快速路径。并发下两个请求可能同时过这一关，
-        //    真正拦得住的是下头第三步的唯一键，所以第 3 步必须接住冲突
-        if (customerRepository.findByPhone(phone).isPresent()) {
-            return Result.fail(400, "该手机号已注册，请直接登录");
+        // 2. 手机号已存在时要分两种 —— 这是本项目一个真实堵过的死循环：
+        //    门店单顾客（柜台建档，有名字、**没密码**）想线上注册，早期会走到
+        //    "该手机号已注册，请直接登录"；而他去登录，又会得到
+        //    "该手机号未设置密码，请先注册"。**两句话互相指着对方，他永远进不来。**
+        //    所以：有密码 = 真重复注册；没密码 = 给他设密码，也就是激活。
+        //
+        //    （注册是手机号+密码、没有验证码的，"别人拿我手机号注册"这个风险
+        //      在正常注册路径上本来就有，激活这条路没有让它变坏。）
+        Customer existing = customerRepository.findByPhone(phone).orElse(null);
+        if (existing != null) {
+            if (existing.hasPassword()) {
+                return Result.fail(400, "该手机号已注册，请直接登录");
+            }
+            if (!customerRepository.updatePassword(
+                    existing.getId(), passwordEncoder.encode(password))) {
+                // CAS 命中 0 行：这一瞬间别人抢先激活了。回同一句话，
+                // 因为对他而言事实就是"这个号已经有密码了"
+                return Result.fail(400, "该手机号已注册，请直接登录");
+            }
+            return Result.ok(new CustomerIdentity(existing.getId(), phone));
         }
         // 3. BCrypt 加密后入库（Bug 5 教训：哈希必须由 encoder 生成，不能手写）
         Customer customer = new Customer();
-        customer.setName(name);
         customer.setPhone(phone);
-        customer.setPasswordHash(passwordEncoder.encode(password));  // storeId 留空
+        customer.setPasswordHash(passwordEncoder.encode(password));
+        // name 不设、storeId 留空：线上注册的顾客没有姓名也没有门店归属
         Long customerId;
         try {
             customerId = customerRepository.save(customer);

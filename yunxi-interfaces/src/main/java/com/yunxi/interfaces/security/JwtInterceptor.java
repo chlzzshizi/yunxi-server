@@ -98,5 +98,17 @@ public class JwtInterceptor implements HandlerInterceptor {
         if ("PUT".equalsIgnoreCase(request.getMethod()) && uri.startsWith("/api/prices")) {
             throw new BusinessException(403, "管理员不能修改价格，请使用店长账号");
         }
+        if (uri.startsWith("/api/customers")) {
+            // 这个前缀下全是顾客业务，没有一件是管理员的：
+            //   · /lookup-or-create 建档 —— 它是为建单服务的（下一个动作就是
+            //     POST /api/orders），而管理员不碰订单，那他也就没有建顾客的理由
+            //   · /me 个人中心 —— 那是顾客自己看/改自己的档案，管理员没有顾客账号
+            // 所以这里按**前缀**一刀切就对了。措辞也得覆盖整个前缀：
+            // 说成"不参与顾客建档"会在 /me 上变成一句错话（他不是不能建档，
+            // 是压根没有"自己"这个档案）。
+            // 注意这里是 /api/customers 不是 /api/auth/customer：顾客**自己**注册登录
+            // 走的是后者，和这条闸门无关（那时他还不是任何账号）
+            throw new BusinessException(403, "管理员不参与顾客相关操作，请使用店长账号");
+        }
     }
 }

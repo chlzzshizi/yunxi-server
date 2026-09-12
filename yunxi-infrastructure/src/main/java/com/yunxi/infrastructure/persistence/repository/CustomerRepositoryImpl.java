@@ -27,6 +27,12 @@ public class CustomerRepositoryImpl implements CustomerRepository {
     }
 
     @Override
+    public Optional<Customer> findById(Long customerId) {
+        CustomerPO po = customerMapper.selectById(customerId);
+        return po == null ? Optional.empty() : Optional.of(toCustomer(po));
+    }
+
+    @Override
     public Long save(Customer customer) {
         CustomerPO po = new CustomerPO();
         po.setName(customer.getName());
@@ -37,6 +43,25 @@ public class CustomerRepositoryImpl implements CustomerRepository {
         // 接口的约定，不在这里吞掉：调用方才知道该给用户提示什么
         customerMapper.insert(po);
         return po.getId();   // MyBatis 把自增主键回填进 PO
+    }
+
+    @Override
+    public boolean updatePassword(Long customerId, String passwordHash) {
+        // 0 行 = 这行已经有密码了（并发下别人抢先激活）—— 当作"没生效"报上去，
+        // 由应用层决定提示什么。不在这里抛异常：仓储不该替调用方决定业务语义
+        return customerMapper.updatePassword(customerId, passwordHash) > 0;
+    }
+
+    @Override
+    public void fillName(Long customerId, String name) {
+        customerMapper.fillName(customerId, name);
+    }
+
+    @Override
+    public void rename(Long customerId, String name) {
+        // 没有返回值：调用方已经手握这一行（个人中心是"先查到、再改"），
+        // 真有并发也不会互相算错账——名字这一列不像密码，后写的赢就是他要的
+        customerMapper.rename(customerId, name);
     }
 
     // ═══════════════════ 内部转换方法 ═══════════════════

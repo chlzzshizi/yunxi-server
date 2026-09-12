@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.yunxi.infrastructure.persistence.mapper.StoreMapper">
+
+    <resultMap id="StoreResultMap"
+               type="com.yunxi.infrastructure.persistence.po.StorePO">
+        <id     column="id"      property="id"/>
+        <result column="name"    property="name"/>
+        <result column="address" property="address"/>
+        <result column="phone"   property="phone"/>
+    </resultMap>
+
+    <!-- 两条都显式列出字段，不用 SELECT *：status 不在这张 resultMap 里，
+         哪天表加了大字段（图片、协议文本），SELECT * 会把它们全捞回来 -->
+    <select id="selectOpen" resultMap="StoreResultMap">
+        SELECT id, name, address, phone
+        FROM stores
+        WHERE status = 1
+        ORDER BY id
+    </select>
+
+    <select id="selectOpenById" resultMap="StoreResultMap">
+        SELECT id, name, address, phone
+        FROM stores
+        WHERE id = #{id} AND status = 1
+    </select>
+</mapper>

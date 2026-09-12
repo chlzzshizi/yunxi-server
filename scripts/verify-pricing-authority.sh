@@ -6,6 +6,7 @@
 #   二、不支持的组合 → 400 且能指导用户；价目表缺行 → 400（不是 500）
 #   三、一次建单是一个事务 —— 明细写不进去时订单也不能留下
 BASE=http://localhost:8081
+TMP="${TMPDIR:-/tmp}/yunxi-e2e"; mkdir -p "$TMP"    # 请求体落盘用，不污染仓库
 PASS=0; FAIL=0
 
 check() {  # check "用例名" "响应" "期望片段"
@@ -25,7 +26,10 @@ checkNot() {  # checkNot "用例名" "响应" "不该出现的片段"
 jqf() { echo "$1" | grep -o "\"$2\":[^,}]*" | head -1 | cut -d: -f2- | tr -d '"'; }
 # 直接查库：接口说算成 15 不算，库里是 15 才算。
 # 故意**不**吞 stderr —— 藏掉 SQL 报错会让"查询失败"看起来像"0 行"
-db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N -e "$1" 2>&1 \
+# --default-character-set=utf8mb4 是必须的：mysql 命令行默认按 latin1 收发，
+# 读中文会整串变 ?????、写中文会存成双重编码 —— 完整说明见 verify-stores.sh 文件头
+db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N \
+       --default-character-set=utf8mb4 -e "$1" 2>&1 \
        | tr -d '\r' | grep -v "password on the command line"; }
 
 echo "########## 准备 ##########"
@@ -39,8 +43,15 @@ ADMIN_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H 'Content-Type: ap
 echo "  manager token 就绪；顾客 13900000091 的 id = $CUST_ID"
 
 # 建单 <token> <body>
-create() { curl -s -X POST "$BASE/api/orders" -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $1" -d "$2"; }
+# body 落文件再 --data-binary：MSYS2 会把命令行参数里的非 ASCII 转成 GBK，
+# 带中文的请求体（如 C1 的配送地址）会被服务端当成非法 UTF-8 直接 400，
+# 而报错完全指不到编码上。$2 是 shell 内部变量，不跨进程边界，写文件是字节安全的。
+# 固定文件名就够：本脚本的 create 全是串行调用，后一次覆盖前一次
+# （跟着 verify-stores.sh 的 postJson 走同一个约定，别改成计数器 ——
+#  调用点写成 $(create ...) 时是子 shell，计数器自增回传不出来，白搭）
+create() { printf '%s' "$2" > "$TMP/req-create.json"
+           curl -s -X POST "$BASE/api/orders" -H "Content-Type: application/json" \
+                -H "Authorization: Bearer $1" --data-binary "@$TMP/req-create.json"; }
 # 从建单响应里取订单号，再用订单号查库拿 id（比从 JSON 里抠 id 稳：
 # 明细也有 id 字段，抠错了会查到别的行）
 orderIdOf() { db "select id from orders where order_no='$(jqf "$1" orderNo)';"; }
@@ -79,7 +90,9 @@ check "B4 响应里的 unitPrice 也是 15.00（前端直接渲染，不用自�
 
 echo
 echo "########## C. 网单也走同一套算价 ##########"
-C1=$(create "$CUST_T" "{\"storeId\":1,\"source\":2,\"items\":[{\"categoryId\":11,\"washTypeId\":1,\"quantity\":1,\"unitPrice\":0.01}]}")
+# deliveryAddress 是**必须**带的：2026-09-12 起网单没地址会被领域层挡下（400），
+# 那这条就不是在测算价了。（这条规则本身由 verify-stores.sh 的 C 段负责验）
+C1=$(create "$CUST_T" "{\"storeId\":1,\"source\":2,\"deliveryAddress\":\"杭州市西湖区文一西路 100 号\",\"items\":[{\"categoryId\":11,\"washTypeId\":1,\"quantity\":1,\"unitPrice\":0.01}]}")
 check "C1 顾客自助下单（塞 unitPrice:0.01）→ 200" "$C1" '"code":200'
 C1_ID=$(orderIdOf "$C1")
 check "C2 库里总价 = 15.00（1 分钱洗衬衫的漏洞已堵）" \

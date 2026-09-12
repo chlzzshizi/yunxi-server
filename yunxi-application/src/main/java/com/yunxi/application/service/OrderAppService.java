@@ -9,6 +9,7 @@ import com.yunxi.common.Result;
 import com.yunxi.common.enums.OrderSource;
 import com.yunxi.common.enums.OrderStatus;
 import com.yunxi.common.enums.PayMethod;
+import com.yunxi.domain.customer.CustomerRepository;
 import com.yunxi.domain.order.Order;
 import com.yunxi.domain.order.OrderItem;
 import com.yunxi.domain.order.OrderRepository;
@@ -16,6 +17,7 @@ import com.yunxi.domain.price.ClothesCategory;
 import com.yunxi.domain.price.ClothesPrice;
 import com.yunxi.domain.price.PriceRepository;
 import com.yunxi.domain.price.WashType;
+import com.yunxi.domain.store.StoreRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -49,11 +51,16 @@ public class OrderAppService {
 
     private final OrderRepository orderRepository;
     private final PriceRepository priceRepository;
+    private final StoreRepository storeRepository;
+    private final CustomerRepository customerRepository;
 
     /** 构造注入 */
-    public OrderAppService(OrderRepository orderRepository, PriceRepository priceRepository) {
+    public OrderAppService(OrderRepository orderRepository, PriceRepository priceRepository,
+                           StoreRepository storeRepository, CustomerRepository customerRepository) {
         this.orderRepository = orderRepository;
         this.priceRepository = priceRepository;
+        this.storeRepository = storeRepository;
+        this.customerRepository = customerRepository;
     }
 
     // ──────────────── 创建 ────────────────
@@ -84,6 +91,28 @@ public class OrderAppService {
         // 门店单是员工代客下单——必须有人操作，谁操作的也要留痕
         if (source == OrderSource.STORE) {
             requireStaff(operatorStaffId);
+        }
+        // 两处「回库确认」，各守一个**来自请求体、无法自证**的值：
+        //   网单   —— storeId 是顾客在请求体里挑的 → 确认它还在营业
+        //   门店单 —— customerId 是员工在请求体里填的 → 确认这个人还在档案里
+        // 另一半（门店单的 storeId、网单的 customerId）都取自 token，是服务器自己签发的。
+        // 同一个值，一个来自请求体、一个来自 token，可信度不一样，校验也就不一样。
+        //
+        // orders 表对这两列**都没有外键**，不在这里守就没人守了：
+        // 漏掉门店校验会建出一张"要送到不存在的地方"的网单；
+        // 漏掉顾客校验会建出一张挂在幽灵顾客身上的单 —— 它不报错，
+        // 但从此所有"按顾客查订单"的地方都会莫名其妙地少一条，极难排查
+        if (source == OrderSource.ONLINE
+                && storeRepository.findOpenById(storeId).isEmpty()) {
+            // 门店不存在 or 已停业，用同一句话：对外都是"这家店现在下不了单"，
+            // 顾客不需要（也不该）知道是"没这家店"还是"店关了"
+            throw new BusinessException("门店不存在或已停业，请重新选择门店");
+        }
+        if (source == OrderSource.STORE
+                && customerRepository.findById(customerId).isEmpty()) {
+            // 这里不区分"没这个人"和"customerId 没传"：门店单的流程是先
+            // lookup-or-create 拿到 id 再建单，两种都是同一个动作出错 —— 重新查一遍
+            throw new BusinessException("顾客不存在，请重新查询或建档");
         }
         // 命令对象 → 领域明细。转换放在"校验之后、算价之前"：
         // 转换里可能要拆箱，先让上面两条校验把空/缺字段的请求挡掉

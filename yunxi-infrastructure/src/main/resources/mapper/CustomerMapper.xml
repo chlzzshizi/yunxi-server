@@ -22,9 +22,44 @@
         WHERE phone = #{phone}
     </select>
 
+    <select id="selectById" resultMap="CustomerResultMap">
+        SELECT id, store_id, name, phone, password, birthday, gender, balance
+        FROM customers
+        WHERE id = #{id}
+    </select>
+
     <insert id="insert" parameterType="com.yunxi.infrastructure.persistence.po.CustomerPO"
             useGeneratedKeys="true" keyProperty="id">
         INSERT INTO customers (store_id, name, phone, password)
         VALUES (#{storeId}, #{name}, #{phone}, #{password})
     </insert>
+
+    <!-- 补设密码（门店单顾客激活）。两件事各自有用：
+         · 只改 password 一列 —— 调用方刚查过这一行，不该顺带覆盖别的字段
+         · WHERE 里的 password IS NULL 是 **CAS**：并发下两个请求同时激活，
+           后到的命中 0 行，于是先设的密码不会被悄悄覆盖 -->
+    <update id="updatePassword">
+        UPDATE customers
+        SET password = #{password}
+        WHERE id = #{id} AND (password IS NULL OR password = '')
+    </update>
+
+    <!-- 补名字。WHERE 里带 name IS NULL 是**第二道锁**：
+         领域仓储接口已经说了"只给没名字的顾客用"，但应用层哪天漏判了，
+         这里会把"误改档案"变成"0 行受影响"——最坏的结果从丢数据降成没生效 -->
+    <update id="fillName">
+        UPDATE customers
+        SET name = #{name}
+        WHERE id = #{id} AND (name IS NULL OR name = '')
+    </update>
+
+    <!-- 改名。**故意没有 WHERE 上的条件** —— 它就是要覆盖已有的名字。
+         这一条的防线不在 SQL 里，而在调用方：customerId 必须来自 token，
+         不能来自请求体，否则改的就是别人的档案了。
+         两条 SQL 长得像、语义相反，所以领域接口那边一个叫 fillName、一个叫 rename。 -->
+    <update id="rename">
+        UPDATE customers
+        SET name = #{name}
+        WHERE id = #{id}
+    </update>
 </mapper>

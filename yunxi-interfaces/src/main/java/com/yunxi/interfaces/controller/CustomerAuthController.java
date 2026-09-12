@@ -32,12 +32,15 @@ public class CustomerAuthController {
     /**
      * 注册（注册即登录，直接返回 Token）
      * POST /api/auth/customer/register
-     * Body: { "name": "张三", "phone": "13800138000", "password": "123456" }
+     * Body: { "phone": "13800138000", "password": "123456" }
+     *
+     * 只要两个字段（2026-09-12 口径）：线上注册不填姓名。
+     * 老前端多传一个 name 也不会报错 —— Spring 把 body 收成 Map，用不上的键自然就丢了。
      */
     @PostMapping("/register")
     public Result<Map<String, String>> register(@RequestBody Map<String, String> body) {
         Result<CustomerIdentity> auth = customerAuthAppService.register(
-                body.get("name"), body.get("phone"), body.get("password"));
+                body.get("phone"), body.get("password"));
         return toTokenResult(auth);
     }
 

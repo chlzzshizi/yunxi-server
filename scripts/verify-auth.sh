@@ -15,9 +15,16 @@
 #   缺 password 时 BCrypt 的英文原文 "rawPassword cannot be null" 被原样回给前端
 #   （Bug 23）。修完之后这些行为就该被钉死，不再只是"拍张照"。
 #
+#   2026-09-12 晚：新增 E 段。注册口径改成"只要手机号 + 密码"，顺带修掉一个
+#   **死循环**——门店单顾客（有名字、没密码）注册说"已注册请登录"、登录说
+#   "未设置密码请先注册"，两句话互相指着对方。E 段钉住新的激活行为。
+#
 # 脏数据：一个停用账号（staff id=98, mgr_disabled）、一个无密码的门店单顾客
 #   （13700000002, WalkIn）。两者都是 insert ignore，可重复跑。
 #   每次运行新注册的顾客会在结尾删掉（见 F 段）。
+#
+# **E 段会改脚手架**（给 WalkIn 设密码），所以 F 段必须把它还原回 NULL——
+# 这个脚本自己改的前置条件，得自己恢复，否则第二次跑必红。
 BASE=http://localhost:8081
 PASS=0; FAIL=0
 
@@ -38,7 +45,10 @@ checkNot() {  # checkNot "用例名" "响应" "不该出现的片段"
   fi
 }
 jqf() { echo "$1" | grep -o "\"$2\":[^,}]*" | head -1 | cut -d: -f2- | tr -d '"'; }
-db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N -e "$1" 2>/dev/null | tr -d '\r'; }
+# --default-character-set=utf8mb4：mysql 命令行默认按 latin1 收发，
+# 读中文会整串变 ?????、写中文会存成双重编码 —— 说明见 verify-stores.sh 文件头
+db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N \
+       --default-character-set=utf8mb4 -e "$1" 2>/dev/null | tr -d '\r'; }
 
 # 每次运行用不同手机号：固定号第二次跑就变"重复注册"，B1 会莫名其妙红
 PHONE_NEW="137$(date +%s | tail -c 9)"
@@ -113,8 +123,16 @@ check "B2 同一手机号再注册 → 400 该手机号已注册" \
 
 check "B3 缺 phone → 400" \
   "$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
-     -d '{"name":"NoPhone","password":"123456"}')" \
-  "姓名、手机号、密码不能为空"
+     -d '{"password":"123456"}')" \
+  "手机号和密码不能为空"
+
+# 2026-09-12 起注册只要手机号+密码。B1 那个请求体里仍然带着 name，
+# 它必须**照样 200** —— 否则前端还没改就会整片挂掉（Spring 收成 Map，
+# 用不上的键自然丢掉，不该报错）
+check "B3b 多传一个用不上的 name 也不报错（老前端兼容）" "$REG" '"code":200'
+checkNot "B3c 新顾客的档案里没有姓名（线上注册确实不知道他是谁）" \
+  "$(db "select ifnull(name,'<NULL>') from customers where phone='$PHONE_NEW';")" \
+  'AuthProbe'
 
 # Bug 5 教训：哈希必须由 encoder 生成，不能手写。这里查库看真实字节
 # [$] 是 grep 里的字面 $，避免在 shell 里转义得眼瞎
@@ -184,17 +202,74 @@ D4=$(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application
 check "D4 门店单顾客 + 没带密码 → 仍回「未设置密码，请先注册」" "$D4" "该手机号未设置密码，请先注册"
 
 D5=$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
-       -d "{\"phone\":\"$PHONE_ABSENT\",\"password\":\"123456\"}")
-check   "D5 顾客注册缺 name → 400 姓名、手机号、密码不能为空" "$D5" "姓名、手机号、密码不能为空"
+       -d "{\"phone\":\"$PHONE_ABSENT\"}")
+check   "D5 顾客注册缺 password → 400 手机号和密码不能为空" "$D5" "手机号和密码不能为空"
 checkNot "D5b 消息里没有英文" "$(jqf "$D5" message)" '[A-Za-z]'
 
 echo
-echo "########## F. 收尾：清掉本次注册的顾客 ##########"
+echo "########## E. 注册口径（2026-09-12：只要手机号 + 密码）##########"
+# 这一段守的是一个**曾经真实存在的死循环**：
+#   门店单顾客（柜台建档：有名字、没密码）想线上注册
+#     → 注册回 400「该手机号已注册，请直接登录」
+#     → 他去登录，回 401「该手机号未设置密码，请先注册」
+#   两句话互相指着对方，他永远进不来。
+# 现在改成：手机号已存在**且没有密码** → 给他补上密码（激活），不是报错。
+
+E_STATUS=$(db "select ifnull(password,'<NULL>') from customers where phone='$PHONE_NOPWD';")
+if [ "$E_STATUS" != "<NULL>" ]; then
+  echo "==> [准备失败] $PHONE_NOPWD 跑 E 段前必须是「无密码」状态，实际 '$E_STATUS'"; exit 1
+fi
+
+E1=$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
+       -d "{\"phone\":\"$PHONE_NOPWD\",\"password\":\"newpwd123\"}")
+check "E1 无密码老顾客注册 → 200（激活，不再是「已注册」）" "$E1" '"code":200'
+E_T=$(jqf "$E1" token)
+if [ -n "$E_T" ]; then
+  echo "  [OK]   E1b 直接拿到了 token（注册即登录）"; PASS=$((PASS+1))
+else
+  echo "  [FAIL] E1b 没拿到 token"; FAIL=$((FAIL+1))
+fi
+
+check "E2 补进去的是 BCrypt 哈希（不是明文）" \
+  "$(db "select password from customers where phone='$PHONE_NOPWD';")" '^[$]2a[$]10[$]'
+check "E2b 而且验的是刚设的那个密码" \
+  "$(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application/json" \
+     -d "{\"phone\":\"$PHONE_NOPWD\",\"password\":\"newpwd123\"}")" '"code":200'
+
+# 激活**不是新建**：还是那一行，id 没变、人数没变
+check "E3 激活后该手机号仍然只有一行（没建出新顾客）" \
+  "$(db "select count(*) from customers where phone='$PHONE_NOPWD';")" '^1$'
+check "E3b 名字还在（激活只补密码，没碰别的字段）" \
+  "$(db "select name from customers where phone='$PHONE_NOPWD';")" 'WalkIn'
+
+# 已经有密码的人再来注册，才是真的重复注册
+check "E4 已激活的号再注册 → 400 该手机号已注册" \
+  "$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
+     -d "{\"phone\":\"$PHONE_NOPWD\",\"password\":\"another-pwd\"}")" \
+  "该手机号已注册，请直接登录"
+check "E4b 而且密码没被后一次注册覆盖掉（还是 newpwd123 能登）" \
+  "$(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application/json" \
+     -d "{\"phone\":\"$PHONE_NOPWD\",\"password\":\"newpwd123\"}")" '"code":200'
+
+echo
+echo "########## F. 收尾：清掉本次造的数，还原脚手架 ##########"
 if [ -n "$PHONE_NEW" ] && [ ${#PHONE_NEW} -eq 11 ]; then
   db "delete from customers where phone='$PHONE_NEW';"
   echo "  已删除本次注册的 $PHONE_NEW（脚手架 mgr_disabled / WalkIn 保留，供下次复用）"
 else
   echo "  [跳过] PHONE_NEW 不合法（'$PHONE_NEW'），不执行删除"
+fi
+
+# E 段给 WalkIn 设了密码。必须还原成 NULL，否则下次跑脚本时准备阶段的
+# 那条守卫（NP_PWD 必须是 <NULL>）会直接 exit 1 —— 脚本自己把自己的前置条件毁了。
+# 「会改数据的脚本要自己还原」这条先例见 verify-price-write.sh
+db "update customers set password=null where phone='$PHONE_NOPWD';"
+RESTORED=$(db "select ifnull(password,'<NULL>') from customers where phone='$PHONE_NOPWD';")
+if [ "$RESTORED" = "<NULL>" ]; then
+  echo "  已还原 $PHONE_NOPWD 的密码为 NULL（脚手架回到初始状态）"
+else
+  echo "  [FAIL] 还原 $PHONE_NOPWD 失败，实际 '$RESTORED' —— 下次跑会准备失败"
+  FAIL=$((FAIL+1))
 fi
 
 echo

@@ -13,7 +13,10 @@ check() {  # check "用例名" "响应" "期望片段"
 }
 jqf() { echo "$1" | grep -o "\"$2\":[^,}]*" | head -1 | cut -d: -f2- | tr -d '"'; }
 # 直接查库：接口说改成功了不算，库里真是那个数才算
-db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N -e "$1" 2>/dev/null | tr -d '\r'; }
+# --default-character-set=utf8mb4：mysql 命令行默认按 latin1 收发，
+# 读中文会整串变 ?????、写中文会存成双重编码 —— 说明见 verify-stores.sh 文件头
+db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N \
+       --default-character-set=utf8mb4 -e "$1" 2>/dev/null | tr -d '\r'; }
 
 # PUT 一个价格，回显响应
 put() { # put <分类id> <washTypeId> <价格>

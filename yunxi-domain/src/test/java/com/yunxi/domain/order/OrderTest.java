@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -277,6 +278,64 @@ class OrderTest {
             assertThat(order.getStatus()).isEqualTo(OrderStatus.COMPLETED);
             assertThat(order.getPaidAmount()).isEqualByComparingTo(TOTAL);
             assertThat(order.getFinishTime()).isNotNull();
+        }
+    }
+
+    // ════════════════ 网单配送地址 ════════════════
+
+    @Nested
+    @DisplayName("fillOrderInfo：网单必须有配送地址")
+    class DeliveryAddress {
+
+        private static final String ADDRESS = "杭州市西湖区文一西路 100 号";
+
+        @Test
+        @DisplayName("网单不填地址 → 400（送到哪都不知道，这单根本没法履约）")
+        void onlineWithoutAddressRejected() {
+            Order order = newOrder(OrderSource.ONLINE);
+
+            assertThatThrownBy(() -> order.fillOrderInfo(null, null, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("配送地址");
+
+            // 被拒之后订单不能被改脏：抛异常前没写任何字段
+            assertThat(order.getDeliveryAddress()).isNull();
+        }
+
+        @Test
+        @DisplayName("网单地址是空白串 → 同样拒（前端把 \"   \" 原样提交是最常见的坏输入）")
+        void onlineBlankAddressRejected() {
+            Order order = newOrder(OrderSource.ONLINE);
+
+            // 只判 null 的话，一个空格就能把这条例外绕过去
+            assertThatThrownBy(() -> order.fillOrderInfo(null, "   ", null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("配送地址");
+        }
+
+        @Test
+        @DisplayName("网单填了地址 → 地址、预约时间、备注一起落上")
+        void onlineWithAddressFills() {
+            Order order = newOrder(OrderSource.ONLINE);
+            LocalDateTime at = LocalDateTime.now().plusDays(1);
+
+            order.fillOrderInfo(at, ADDRESS, "袖口有污渍");
+
+            assertThat(order.getDeliveryAddress()).isEqualTo(ADDRESS);
+            assertThat(order.getAppointmentTime()).isEqualTo(at);
+            assertThat(order.getRemark()).isEqualTo("袖口有污渍");
+        }
+
+        @Test
+        @DisplayName("门店单不填地址 → 放行（衣服就在店里等顾客来取，本来就不需要地址）")
+        void storeOrderNeedsNoAddress() {
+            Order order = newOrder(OrderSource.STORE);
+
+            order.fillOrderInfo(null, null, null);   // 全空 → 短路，一个字段都不动
+
+            assertThat(order.getDeliveryAddress()).isNull();
+            assertThat(order.getAppointmentTime()).isNull();
+            assertThat(order.getRemark()).isNull();
         }
     }
 }

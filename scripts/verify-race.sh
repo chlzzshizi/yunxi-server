@@ -19,7 +19,10 @@ MYSQL="docker exec -i yunxi-mysql mysql -uroot -pqwaszx123 yunxi"
 # 写死路径就等于"换个地方跑就崩"，而且 /c/tmp 这个 MSYS 写法在 Linux 上根本不存在
 TMP="${TMPDIR:-/tmp}/yunxi-e2e"; mkdir -p "$TMP"
 jqf() { echo "$1" | grep -o "\"$2\":[^,}]*" | head -1 | cut -d: -f2- | tr -d '"'; }
-db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N -e "$1" 2>/dev/null | tr -d '\r'; }
+# --default-character-set=utf8mb4：mysql 命令行默认按 latin1 收发，
+# 读中文会整串变 ?????、写中文会存成双重编码 —— 说明见 verify-stores.sh 文件头
+db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N \
+       --default-character-set=utf8mb4 -e "$1" 2>/dev/null | tr -d '\r'; }
 
 MGR_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H 'Content-Type: application/json' \
   -d '{"username":"manager","password":"admin123"}')" token)

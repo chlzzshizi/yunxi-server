@@ -72,6 +72,16 @@ public class Order {
     /** 创建订单时一次性填写网单要素（后续不可改）。全为 null 时跳过 */
     public void fillOrderInfo(LocalDateTime appointmentTime,
                               String deliveryAddress, String remark) {
+        // 网单必须有配送地址 —— "衣服送到哪"是网单能不能履约的前提，没有它就谁也送不到。
+        // 门店单不走快递（衣服就在店里等顾客来取），地址为空是正常的，所以不校验。
+        //
+        // 守在领域而不是应用层：这是订单自己的不变量，换任何入口进来都绕不掉
+        // （应用层还有别的调用方：定时任务、后台脚本、第二个前端）。
+        // 空白串也算没填 —— 前端把输入框的 "   " 原样提交上来是最常见的坏输入
+        if (this.source == OrderSource.ONLINE
+                && (deliveryAddress == null || deliveryAddress.isBlank())) {
+            throw new BusinessException("网单必须填写配送地址");
+        }
         if (appointmentTime == null && deliveryAddress == null && remark == null) {
             return;
         }
