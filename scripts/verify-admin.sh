@@ -106,6 +106,24 @@ getJson() {  curl -s "$BASE$1" -H "Authorization: Bearer $2"; }
 # 助手抄 bench-coupon.sh 的 redis_get。
 redis_get() { docker exec yunxi-redis redis-cli get "$1" 2>/dev/null | tr -d '\r'; }
 
+# 作废之后**重新登录** —— 必须等过那一秒，所以单独留个助手（Bug 34 的窗口）。
+#
+# 机制：JWT 的 iat 是**秒**精度，水位线是**毫秒**（revokeAll 写
+# System.currentTimeMillis()，isRevoked 判的是 iat.getTime() < watermark）。
+# 若"作废那次操作"与"这次重新登录"落在**同一个自然秒**里，新票的 iat 会被
+# 截断到该秒的起点 → iat < 水位线 成立 → **刚签发的新票被判成旧的**（偏拒绝方向）。
+# sleep 1 是从构造上排除它的唯一办法：≥1 秒必然跨过一个秒边界。
+#
+# 为什么以前只有 B6c 那一处写着 sleep 1：本地 docker exec 慢（一次几百毫秒），
+# 别的几处"几乎总能"跨过秒边界 —— 那是**运气**，不是保证。
+# 2026-09-19 CI 第一次真跑就证伪了：本脚本 **116 / 2**，C4b 和 D5 两条
+# 正是被这个窗口打中的（同一份脚本在本地 118/118 一直绿）。
+# 现在四处重新登录全走这里，规则只住一个地方。
+relogin() {  # relogin <用户名> <密码> → 新票
+  sleep 1
+  jqf "$(postJson /api/auth/staff/login "{\"username\":\"$1\",\"password\":\"$2\"}" "")" token
+}
+
 # ═══════════════════ 准备 ═══════════════════
 
 RUN=$(date +%s)
@@ -384,15 +402,10 @@ B6=$(putJson "/api/staff/$U_A_ID/status" '{"status":1}' "$ADMIN_T")
 check "B6 重新启用 → 200 且回显 status=1" "$B6" '"status":1'
 check "B6b 重新启用后，停用前那张票**仍然是 401**（旧票不会复活）" \
   "$(getJson /api/staff "$T_A")" '"code":401'
-# 但要能重新登录 —— 否则"启用"这个动作是假的
-#
-# sleep 1 **不是凑数**，它绕的是一个真实存在的亚秒级窗口：
-# JWT 的 iat 是**秒**精度，水位线是**毫秒**。若"停用"和"这次重新登录"
-# 落在同一个自然秒里，新票的 iat 会被截断到那个秒的起点，于是
-# iat < 水位线 成立 —— **刚签发的新票会被判成旧的**（偏拒绝方向）。
-# 窗口 ≤ 1 秒且下一秒自动恢复，见 StaffTokenRevoker 的类注释。
-sleep 1
-T_A2=$(jqf "$(postJson /api/auth/staff/login "{\"username\":\"$U_A\",\"password\":\"$PW\"}" "")" token)
+# 但要能重新登录 —— 否则"启用"这个动作是假的。
+# 这里的 sleep 1 是**这个窗口最早被发现的地方**（Bug 34 就是在这里量到的），
+# 现在那段说明在 relogin 助手里 —— 四处重新登录共用同一条规则。
+T_A2=$(relogin "$U_A" "$PW")
 if [ -z "$T_A2" ]; then
   echo "==> [准备失败] 启用之后重新登录没拿到 token —— 那说明「启用」是假的"; exit 1
 fi
@@ -432,7 +445,7 @@ check "C4 同一张票**立刻** 401（票里还签着旧的 role=0，不作废�
   "$(getJson /api/staff "$T_C")" '"code":401'
 # C4b 是 C4 的**判据**：两张票一个 401 一个 403，才说明 C4 的死因是"票作废了"，
 # 而不是"角色不够"（403）。少了它，C4 的 401 可能只是别的原因
-T_C2=$(jqf "$(postJson /api/auth/staff/login "{\"username\":\"$U_C\",\"password\":\"$PW\"}" "")" token)
+T_C2=$(relogin "$U_C" "$PW")
 if [ -z "$T_C2" ]; then echo "==> [准备失败] 降级后重新登录没拿到 token"; exit 1; fi
 check "C4b 换一张**新票**：他现在只是店长 → 403（两句不同，C4 的 401 才说得清是"票废了"）" \
   "$(getJson /api/staff "$T_C2")" "员工与门店管理只对管理员开放"
@@ -472,7 +485,8 @@ check "D4c 改资料没有顺手改 status（还是 1）" "$(jqf "$D4" status)" 
 # ── 调岗：把 C 段那个店长挂到新店上 ──
 # 四种作废情形里的第三种（停用 / 降级 / 改门店 / 重置密码）。漏掉它的话，
 # "把他调到别的店"之后，他手上那张票里签的还是旧 storeId
-T_C3=$(jqf "$(postJson /api/auth/staff/login "{\"username\":\"$U_C\",\"password\":\"$PW\"}" "")" token)
+# D5 的票必须在**上一次作废（C3 降级）那一秒之外**签发 —— 否则它一出生就是旧的
+T_C3=$(relogin "$U_C" "$PW")
 if [ -z "$T_C3" ]; then echo "==> [准备失败] 调岗前登录没拿到 token"; exit 1; fi
 check "D5 调岗之前，这张票是在用的（对照组）" \
   "$(getJson /api/stores "$T_C3")" '"code":200'
@@ -484,7 +498,7 @@ check "D6b 库里 store_id 变了" \
   "$(db "select store_id from staff where id=$U_C_ID;")" "^$S_NEW_ID$"
 check "D6c **调岗也作废了**他那张票（401）" "$(getJson /api/stores "$T_C3")" '"code":401'
 
-T_C4=$(jqf "$(postJson /api/auth/staff/login "{\"username\":\"$U_C\",\"password\":\"$PW\"}" "")" token)
+T_C4=$(relogin "$U_C" "$PW")
 if [ -z "$T_C4" ]; then echo "==> [准备失败] 调岗后重新登录没拿到 token"; exit 1; fi
 check "D6d 重新登录的新票能用" "$(getJson /api/stores "$T_C4")" '"code":200'
 
@@ -605,7 +619,8 @@ echo "########## E14–E19 改密码的成功路径（本仓脚本第一次真�
 # 对照组和 E18 用同一条 URL（/api/orders）—— 此刻 U_C 已被 C 段降级成店长，
 # 店长进得去这条。**特意不用 /api/staff**：店长在那条 URL 上"票好=403、票废=401"，
 # 403 会把前后对照搅浑（B3 那条注释里同一个坑）。E18 则因此干净地只可能来自作废检查。
-T_C5=$(jqf "$(postJson /api/auth/staff/login "{\"username\":\"$U_C\",\"password\":\"$PW\"}" "")" token)
+# 走 relogin（要等过一秒）：上一次作废是 D6 的调岗，离得不算近但**不保证跨秒**
+T_C5=$(relogin "$U_C" "$PW")
 if [ -z "$T_C5" ]; then
   echo "==> [准备失败] 改密码前的对照组登录没拿到票（$U_C / $PW）"; exit 1
 fi
