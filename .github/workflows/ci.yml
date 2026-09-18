@@ -1,0 +1,200 @@
+name: 验收
+
+# 这个 workflow 存在的理由只有一条，写在 Bug 29 里：
+#
+#   "脚本里的假绿下次跑就露馅，**文档里的假绿没有任何东西会去重跑它**。"
+#
+# 38 条 bug 里有 10 条（21/22/25/26/27/29/30/31/32/34）的病根是同一个 ——
+# **验证发生过一次，然后再没人跑第二遍**。压测那轮的 872 TPS 同理：
+# 没有任何东西能证明它下周还成立。CI 就是"去重跑它的那个东西"，
+# 把这条主线从"靠自觉"换成"靠机制"。
+#
+# 它跑的是**真机验收**，不是只有单测：MySQL 8 + Redis 7 用 docker run 起，
+# 容器名故意和本地一字不差（yunxi-mysql / yunxi-redis）—— 各脚本里的
+# db() / redis 断言是 `docker exec yunxi-mysql ...` 写死的，改名就全废。
+#
+# 刻意不做的两件事：
+#   1. 用 service container 起 MySQL —— 那样容器名是随机前缀，docker exec 找不到
+#   2. 在 CI 里报压测的 TPS —— runner 是共享虚机，数字没有意义（见下面的冒烟步）
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: 单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      # 不写 -o（离线）：CI 上 ~/.m2 是空的，离线会直接失败。
+      # 本地跑才用 -o，那是为了不联网。
+      - name: ./mvnw test
+        run: ./mvnw -B test
+
+  e2e:
+    name: 真机验收（九个脚本）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      - name: 起 MySQL + Redis
+        run: |
+          # 参数逐字抄 docker-compose.yml —— CI 和本地跑的不是两套环境
+          docker run -d --name yunxi-mysql \
+            -e MYSQL_ROOT_PASSWORD=qwaszx123 \
+            -e MYSQL_DATABASE=yunxi \
+            -e TZ=Asia/Shanghai \
+            -p 3306:3306 \
+            mysql:8.0 \
+            --character-set-server=utf8mb4 \
+            --collation-server=utf8mb4_unicode_ci
+          docker run -d --name yunxi-redis -p 6379:6379 redis:7-alpine
+
+      # mysql:8.0 首次启动要跑初始化（建库、建 root 用户），冷启动能到 30-40 秒。
+      # 不等就绪直接起后端，Flyway 会报连不上 —— 然后你会去查 Flyway，方向全错。
+      #
+      # ⚠️ 判据**不能用 `mysqladmin ping`**：MySQL 8 初始化期间会先起一个临时实例，
+      # ping 会提前返回 "mysqld is alive"，于是后端在真正就绪前就启动了。
+      # 那是个假绿的就绪检查 —— 比没有检查更坏，因为它让你以为已经等过了。
+      #
+      # 换成真查询，一次证明四件事：服务在、root 认证过 TCP 能过、
+      # `yunxi` 库已建（说明 MYSQL_DATABASE 生效、初始化真的跑完了）、客户端可用。
+      - name: 等 MySQL 就绪（真查询，不是 ping）
+        run: |
+          for i in $(seq 1 60); do
+            n=$(docker exec yunxi-mysql mysql -uroot -pqwaszx123 -N -e \
+                  "select count(*) from information_schema.schemata where schema_name='yunxi'" \
+                  2>/dev/null | tr -d '\r')
+            if [ "$n" = "1" ]; then
+              echo "MySQL 就绪（第 $i 次探测，约 $((i * 2)) 秒）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "==> MySQL 120 秒没就绪，最后 40 行日志："
+          docker logs yunxi-mysql 2>&1 | tail -40
+          exit 1
+
+      # README 里写了：直接从 yunxi-interfaces 跑 spring-boot:run 会 ClassNotFoundException，
+      # 兄弟模块没进本地仓库。这一步不能省。
+      - name: 装到本地仓库
+        run: ./mvnw -B -q install -DskipTests
+
+      - name: 起后端
+        run: |
+          cd yunxi-interfaces
+          # application.yml:50 是 logging.level.com.yunxi: debug，而 MyBatis mapper 的
+          # FQN 正好在 com.yunxi 下 —— 不压掉就是在压 logback（见 bench-coupon.sh 的坑三）。
+          # 用 -D 覆盖，不改 application.yml。
+          nohup ../mvnw -B spring-boot:run \
+            -Dspring-boot.run.jvmArguments="-Dlogging.level.com.yunxi=warn" \
+            > /tmp/yunxi-app.log 2>&1 &
+          echo "后端已在后台启动，日志 /tmp/yunxi-app.log"
+
+      # 探测用「响应体里的 code」而不是 HTTP 状态码：本项目 HTTP 恒为 200，
+      # 看状态码的话连接被拒(000)和真正就绪(200)之外，什么也分不出来。
+      # 断言 "code":401 证明的是：**应用起来了、拦截器在、JSON 序列化在**。
+      #
+      # ⚠️ 2026-09-18 更正：这里原先还写着"路由在"，**那句是错的**。
+      # /api/** 全被拦截器罩着，未匹配的路径会落到静态资源处理器上、照样过拦截器 ——
+      # 实测 `GET /api/nonexistent-xyz`（一个绝对不存在的路由）也回
+      # `{"code":401,"message":"未登录"}`。所以 **401 不携带"这条路由存在吗"的信息**，
+      # 别拿它当路由探针（想验路由得带一张有效 token 去看它回 200 还是"资源不存在"）。
+      - name: 等后端就绪
+        run: |
+          for i in $(seq 1 90); do
+            resp=$(curl -s --max-time 5 http://localhost:8081/api/prices || true)
+            case "$resp" in
+              *'"code":401'*)
+                echo "后端就绪（第 $i 次探测，约 $((i * 2)) 秒）"
+                exit 0
+                ;;
+            esac
+            sleep 2
+          done
+          echo "==> 后端 180 秒没起来，最后 60 行日志："
+          tail -60 /tmp/yunxi-app.log
+          exit 1
+
+      # 九个脚本全跑完再汇总，**不在第一个红就停**。
+      # 这是刻意的：这个项目反复踩的正是"看见一个绿就以为全绿"，
+      # 在第一个失败处中断会让你以为后面八个是好的。
+      # 一次 push 应该告诉你**全部**哪里坏了。
+      #
+      # 循环用的是通配符（scripts/verify-*.sh），所以**新加脚本不用改这里** ——
+      # verify-admin.sh 就是这么被收进来的。代价是这里的注释和
+      # scripts/README.md 的计数表要靠人跟着改（README 自己也说了这是快照）。
+      - name: 跑九个验收脚本
+        run: |
+          mkdir -p /tmp/e2e
+          FAILED=0
+          for s in scripts/verify-*.sh; do
+            name=$(basename "$s" .sh)
+            echo "::group::$name"
+            if bash "$s" > "/tmp/e2e/$name.log" 2>&1; then
+              mark="OK  "
+            else
+              mark="FAIL"
+              FAILED=$((FAILED + 1))
+            fi
+            tail -8 "/tmp/e2e/$name.log"
+            echo "::endgroup::"
+            sum=$(grep -o '通过 [0-9]* 项，失败 [0-9]* 项' "/tmp/e2e/$name.log" | tail -1)
+            printf '%-34s %s  %s\n' "$name" "$mark" "${sum:-（没打印汇总行，脚本可能提前退出）}" \
+              | tee -a /tmp/e2e/summary.txt
+          done
+
+          echo
+          echo "================ 汇总 ================"
+          cat /tmp/e2e/summary.txt
+          echo "======================================"
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "==> $FAILED 个脚本失败"
+            exit 1
+          fi
+          echo "九个脚本全绿"
+
+      # 压测器进 CI，但**只验正确性、不报性能数字**。
+      # runner 是共享虚机，同机还挤着 MySQL/Redis/后端，测出来的 TPS 没有任何意义 ——
+      # 报了就是往文档里塞一个不可复现的数（Bug 29 的形状）。
+      # 而它的断言（0 超卖 / 去重 / 库存键停在负数）是**正确性**断言，值得每次都跑。
+      # N=50 而不是默认 500：CI 上只为证明"跑得通且不超卖"，不为量吞吐。
+      - name: 抢券并发正确性冒烟（不报性能数字）
+        run: N=50 STOCK=25 bash scripts/bench-coupon.sh
+
+      # 任何一步红了都要拿到后端日志 —— 否则排查只能靠猜。
+      # e2e 这一步失败时，脚本自己的日志已经在上面的 ::group:: 里了，这里补后端侧。
+      - name: 失败时上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: |
+            /tmp/yunxi-app.log
+            /tmp/e2e/*.log
+          if-no-files-found: ignore
+          retention-days: 7
