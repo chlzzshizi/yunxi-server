@@ -26,12 +26,41 @@ put() { # put <分类id> <washTypeId> <价格>
 }
 priceOf() { db "select price from clothes_prices where category_id=$1 and wash_type_id=$2;"; }
 
+# 姓名用 ASCII：Git Bash 会把 shell 里的中文按 GBK 发出去，后端按 UTF-8 解析会 400
+# （这是脚本的锅不是后端的；中文经文件投递的用例见 B1/G1）
+# 与 verify-orders.sh / verify-coupons.sh 里的同名函数**逐字一致** —— 不改字面量，
+# 三份复制是既有的约定（脚本之间不互相 source，跑单个脚本要能独立成立）
+login_or_register() {
+  local name=$1 phone=$2 resp token
+  resp=$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
+    -d "{\"name\":\"$name\",\"phone\":\"$phone\",\"password\":\"123456\"}")
+  token=$(jqf "$resp" token)
+  if [ -z "$token" ]; then
+    resp=$(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application/json" \
+      -d "{\"phone\":\"$phone\",\"password\":\"123456\"}")
+    token=$(jqf "$resp" token)
+  fi
+  echo "$token"
+}
+
 echo "########## 准备 ##########"
 MGR_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H 'Content-Type: application/json' \
   -d '{"username":"manager","password":"admin123"}')" token)
-CUST_T=$(jqf "$(curl -s -X POST $BASE/api/auth/customer/login -H 'Content-Type: application/json' \
-  -d '{"phone":"13900000091","password":"123456"}')" token)
-echo "  manager/customer token 就绪"
+# 顾客脚手架 13900000091 **不是本脚本建的**，是 verify-price.sh 建的 —— 而它在通配符
+# 顺序里排在本脚本**后面**（"price-write" < "price"：'-'(0x2D) 比 '.'(0x2E) 小）。
+# 所以库里没这个号时，只 login 是拿不到票的 —— 这就是 Bug 38：
+# 票为空 → `Authorization: Bearer `（空值）→ 拦截器回「未登录」→ A1 报"鉴权坏了"，
+# 而真因是"脚手架没拿到票"。改用两个兄弟脚本早就在用的 login_or_register。
+CUST_T=$(login_or_register PriceWriterCust 13900000091)
+
+# 脚手架自检（Bug 38）。**空票必须当场停下**：原先这里只印一句"就绪"，票是空的也照印。
+# 印长度而不是票面值：空/非空一眼可判，也不把票写进 CI 的日志产物。
+if [ -z "$MGR_T" ] || [ -z "$CUST_T" ]; then
+  echo "  [致命] 脚手架没拿到 token（manager=${#MGR_T} 字符，customer=${#CUST_T} 字符）"
+  echo "         后端是否在 8081？manager/admin123 能否登录？"
+  exit 1
+fi
+echo "  manager/customer token 就绪（${#MGR_T} / ${#CUST_T} 字符）"
 TOKEN=$MGR_T
 
 echo "  初始状态：衬衫 11 = $(priceOf 11 1)/$(priceOf 11 2)/$(priceOf 11 3)   羽绒服 13 = $(priceOf 13 1)/$(priceOf 13 2)/$(priceOf 13 3)"

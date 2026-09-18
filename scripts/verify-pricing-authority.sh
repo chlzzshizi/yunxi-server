@@ -32,15 +32,59 @@ db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N \
        --default-character-set=utf8mb4 -e "$1" 2>&1 \
        | tr -d '\r' | grep -v "password on the command line"; }
 
+# 顾客注册 → 已注册则登录，返回 token。
+# 姓名用 ASCII：Git Bash 会把 shell 里的中文按 GBK 发出去，后端按 UTF-8 解析会 400
+# （这是脚本的锅不是后端的；中文经文件投递的用例见 B1/G1）
+# 与 verify-orders.sh / verify-coupons.sh / verify-price-write.sh 里的同名函数**逐字一致**
+# （脚本之间不互相 source，四份拷贝是故意的；要的就是"单跑任何一个都成立"）
+login_or_register() {
+  local name=$1 phone=$2 resp token
+  resp=$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
+    -d "{\"name\":\"$name\",\"phone\":\"$phone\",\"password\":\"123456\"}")
+  token=$(jqf "$resp" token)
+  if [ -z "$token" ]; then
+    resp=$(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application/json" \
+      -d "{\"phone\":\"$phone\",\"password\":\"123456\"}")
+    token=$(jqf "$resp" token)
+  fi
+  echo "$token"
+}
+
 echo "########## 准备 ##########"
 MGR_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H 'Content-Type: application/json' \
   -d '{"username":"manager","password":"admin123"}')" token)
-CUST_T=$(jqf "$(curl -s -X POST $BASE/api/auth/customer/login -H 'Content-Type: application/json' \
-  -d '{"phone":"13900000091","password":"123456"}')" token)
-CUST_ID=$(db "select id from customers where phone='13900000091';")
 ADMIN_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"admin123"}')" token)
-echo "  manager token 就绪；顾客 13900000091 的 id = $CUST_ID"
+
+# 顾客脚手架 13900000091 **不是本脚本建的**，是 verify-price.sh 建的。通配符顺序里
+# 它排在本脚本**前面**（"price." < "pricing"：e(0x65) < i(0x69)），所以**九连跑时**它总在。
+# 但"总在"靠的是**别人留下的残留**，不是本脚本的前提：清过库、或单跑本脚本，它就不在。
+# 那时原写法只 login → 拿到**空票**，$CUST_ID 也会是空串，于是每个请求体退化成
+# {"customerId":,...} 这种畸形 JSON —— A/B/C/D/E 会红成一片"算价坏了、事务坏了"，
+# 而 F 段还会**假绿**（F1 断言"不是 200"、F2/F3 断言"前后没变"：建单压根没发出去，
+# 三条都无条件成立）。这是 **Bug 38** 的同一个形状，只是这次会从 B 段开始爆。
+CUST_T=$(login_or_register PricingAuthorityCust 13900000091)
+CUST_ID=$(db "select id from customers where phone='13900000091';")
+
+# 脚手架自检（**Bug 38** 的规矩："就绪"必须是断言，不能是台词 —— 原先这里就是一句
+# 无条件的 echo，票空着、id 空着也照印"就绪"）。
+# 印长度不印票面值：空/非空一眼可判，也不把票写进 CI 的日志产物。
+# CUST_ID **判的是形状不是有无**：本脚本的 db() 故意不吞 stderr（见上面的注释），
+# MySQL 一挂它返回的就是 docker 的报错文本 —— 非空，但根本不是 id，照样打成畸形 JSON。
+BAD=""
+[ -z "$MGR_T" ]   && BAD="$BAD manager票空"
+[ -z "$ADMIN_T" ] && BAD="$BAD admin票空"
+[ -z "$CUST_T" ]  && BAD="$BAD customer票空"
+case "$CUST_ID" in
+  ''|*[!0-9]*) BAD="$BAD customerId($CUST_ID)不是数字";;
+esac
+if [ -n "$BAD" ]; then
+  echo "  [致命] 脚手架没就绪：$BAD"
+  echo "         票长 manager=${#MGR_T} admin=${#ADMIN_T} customer=${#CUST_T}"
+  echo "         后端是否在 8081？manager/admin123 与 admin/admin123 能否登录？"
+  exit 1
+fi
+echo "  manager/admin/customer token 就绪（${#MGR_T} / ${#ADMIN_T} / ${#CUST_T} 字符）；顾客 13900000091 的 id = $CUST_ID"
 
 # 建单 <token> <body>
 # body 落文件再 --data-binary：MSYS2 会把命令行参数里的非 ASCII 转成 GBK，
