@@ -135,7 +135,8 @@ public class JwtInterceptor implements HandlerInterceptor {
             throw new BusinessException(403, "员工与门店管理只对管理员开放，请使用管理员账号");
         }
 
-        // ── 方向二：管理员不参与日常经营 ⇒ 拦管理员（原有三条，一个字没改）──
+        // ── 方向二：管理员不参与日常经营 ⇒ 拦管理员（订单 / 定价写 / 顾客 三条，
+        //    2026-09-19 加上"发券"这条第四条；每条的就地注释写着它自己的理由）──
         if (role == null || role != StaffRole.ADMIN.getCode()) {
             return;   // 店长：订单与定价都是他的本职，以下三条都不关他的事
         }
@@ -146,6 +147,23 @@ public class JwtInterceptor implements HandlerInterceptor {
         }
         if ("PUT".equalsIgnoreCase(request.getMethod()) && uri.startsWith("/api/prices")) {
             throw new BusinessException(403, "管理员不能修改价格，请使用店长账号");
+        }
+        if ("POST".equalsIgnoreCase(request.getMethod()) && "/api/coupons".equals(uri)) {
+            // 发券（2026-09-19 拍板：**管理员不发券**）。理由与订单/顾客同一条：
+            // 券发出去就是给人抢、给人下单核销的，整条链路都是顾客侧业务 ——
+            // 管理员既然不碰订单也不碰顾客，就没有发券的理由。
+            //
+            // 拍板前这里的判据是"是员工就行"（CouponController 里那句
+            // `!"staff".equals(type)`），管理员**能**发券。那是 Bug 42 补闸时
+            // 明确留下的口径问题（当时标成"待拍板"），不是漏。
+            //
+            // 判据只认 **POST 且路径精确等于 /api/coupons**：
+            //   · 抢券 POST /api/coupons/{id}/grab 也是 POST，但那是**顾客**的动作，
+            //     管理员打到那儿该收到 controller 的「请使用顾客账号登录」——
+            //     被这里截住会把它换成一句错话（他不是"不该发券"，是没有顾客账号）
+            //   · 读（GET /api/coupons、/api/coupons/mine）本次没动，与 /api/prices
+            //     同形："看得见，不能写"。要连读一起收是另一个决定。
+            throw new BusinessException(403, "管理员不参与发券，请使用店长账号");
         }
         if (uri.startsWith("/api/customers")) {
             // 这个前缀下全是顾客业务，没有一件是管理员的：

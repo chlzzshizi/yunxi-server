@@ -70,6 +70,9 @@ echo "########## 准备 ##########"
 
 MGR_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H 'Content-Type: application/json' \
   -d '{"username":"manager","password":"admin123"}')" token)
+# 管理员票：J 段要拿它证明"票是真的、只是角色不对"。种子账号来自 V4（admin/admin123）
+ADMIN_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}')" token)
 # 门店单的 used_staff_id 该等于谁 —— 不写死 2，从库里读，避免"账号 id 恰好是 2"这种隐性前提
 MGR_ID=$(db "select id from staff where username='manager';")
 
@@ -116,7 +119,7 @@ SAVE_AMT=$(awk -v b="$BASE_AMT" -v a="$PAY_AMT" 'BEGIN{printf "%.2f", b-a}')
 #     而空串拼进 URL/SQL 不报错，只会让断言错得莫名其妙
 #   · 单价：小数，case 那套判不了，交给 awk 校验"数字，最多一个小数点"
 BAD=""
-for v in MGR_T CUST1 CUST2; do
+for v in MGR_T ADMIN_T CUST1 CUST2; do
   [ -z "${!v}" ] && BAD="$BAD $v(票空)"
 done
 for v in MGR_ID CUST1_ID CUST2_ID; do
@@ -411,6 +414,32 @@ check "J3 负折扣（-0.50）→ 400 同一句话（判据是 <= 0，不是 == 
   "$(curl -s -X POST $BASE/api/coupons -H "Content-Type: application/json" \
      -H "Authorization: Bearer $MGR_T" --data-binary @"$TMP/negdisc.json")" \
   "折扣率必须大于 0 且不超过 1"
+
+# J4/J4a 是 2026-09-19 拍板"管理员不发券"之后补的（Bug 42 当时留下的口径问题）。
+# 闸在 JwtInterceptor.checkRoleGate 的**方向二**（拦管理员那三条的旁边），
+# 判据 = POST + 路径精确等于 /api/coupons —— 所以 J1 那条顾客 401 不受影响
+# （顾客在拦截器里直接放行，拦他的是 controller），抢券也是。
+# 措辞与订单/顾客那几句同形："不参与……请使用店长账号"。
+printf '{"name":"CPN-E2E-ADMIN","discount":0.50,"totalStock":100,"startTime":"%s","endTime":"%s"}' \
+  "$NOW_START" "$NOW_END" > "$TMP/admin.json"
+check "J4 管理员 token 发券 → 403 管理员不参与发券（票是真的，角色不对）" \
+  "$(curl -s -X POST $BASE/api/coupons -H "Content-Type: application/json" \
+     -H "Authorization: Bearer $ADMIN_T" --data-binary @"$TMP/admin.json")" \
+  "管理员不参与发券"
+
+check "J4a 被拒之后库里没有这张券（闸在拦截器里，早于 controller 和 insert）" \
+  "$(db "select count(*) from coupons where name='CPN-E2E-ADMIN';")" "^0$"
+
+# 对照：同一时刻、同一个端点、同一种请求体，只是换成店长 —— 发得出来。
+# 没有这条，J4 在"发券整个功能塌了"的情况下照样绿（Bug 29 的形状：验的不是它声称的事）。
+# 对照用**另一个券名**：CPN-E2E-ADMIN 必须永远保持 0 行，上面那条 ^0$ 重跑才成立
+# （用同一个名字的话，对照每跑一次就多一行，第二次跑 J4a 必红 —— 本机与 CI 又要分家）
+printf '{"name":"CPN-E2E-CTRL","discount":0.50,"totalStock":100,"startTime":"%s","endTime":"%s"}' \
+  "$NOW_START" "$NOW_END" > "$TMP/ctrl.json"
+CTRL_ID=$(jqf "$(curl -s -X POST $BASE/api/coupons -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MGR_T" --data-binary @"$TMP/ctrl.json")" id)
+case "$CTRL_ID" in ''|*[!0-9]*) CTRL_OK=0;; *) CTRL_OK=1;; esac
+verdict "J4b 对照：同样请求体换成店长 → 拿到数字 id（'$CTRL_ID'）—— J4 的 403 是分人，不是端点坏了" "$CTRL_OK"
 
 echo
 echo "================================"

@@ -344,6 +344,7 @@ class JwtInterceptorTest {
             passes("PUT", "/api/prices/11", token);
             passes("GET", "/api/prices", token);
             passes("POST", "/api/customers/lookup-or-create", token);
+            passes("POST", "/api/coupons", token);   // 发券是店长的本职（2026-09-19）
         }
     }
 
@@ -384,6 +385,24 @@ class JwtInterceptorTest {
                     .isEqualTo(403);
             assertThat(blocked("GET", "/api/customers/me", token).getMessage())
                     .isEqualTo("管理员不参与顾客相关操作，请使用店长账号");
+        }
+
+        @Test
+        @DisplayName("管理员发券 → 403；读券列表与抢券的路径不归这条管（2026-09-19 拍板）")
+        void couponIssueBlocked() {
+            String token = staffToken(ADMIN);
+
+            assertThat(blocked("POST", "/api/coupons", token).getMessage())
+                    .isEqualTo("管理员不参与发券，请使用店长账号");
+
+            // 判据是 "POST" 且路径**精确等于** /api/coupons 两个条件同时成立。
+            // 下面两条是它的两侧边界，各防一个具体的错法：
+            //   · 改成只按方法拦（不看路径）→ POST /{id}/grab 会被截成"不参与发券"，
+            //     而那是顾客的动作，管理员该收到的是「请使用顾客账号登录」
+            //   · 改成只按前缀拦（不看方法）→ GET 也被拦，读被顺手收掉了；
+            //     读本次**刻意没动**，与 /api/prices 同形："看得见，不能写"
+            passes("POST", "/api/coupons/12/grab", token);
+            passes("GET", "/api/coupons", token);
         }
     }
 
