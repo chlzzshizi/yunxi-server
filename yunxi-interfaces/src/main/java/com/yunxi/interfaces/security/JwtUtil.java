@@ -118,6 +118,25 @@ public class JwtUtil {
         return parseToken(token).get("storeId", Long.class);
     }
 
+    /**
+     * 从 Token 取**签发时间**（iat）。
+     *
+     * 唯一的用途是配合 StaffTokenRevoker 判断"这张票是不是在某人被停用/降级
+     * 之前签的"。**它不是我新加的 claim** —— generateToken 从第一天起就写了
+     * `.issuedAt(now)`，这里只是把它读出来（jjwt 的 Claims.getIssuedAt 现成的）。
+     * 所以这个改动没有碰签发路径、没有碰登录接口。
+     *
+     * 返回 jjwt 原生的 Date（可能为 null：老 token 若没有 iat）。
+     * **调用方必须处理 null** —— 拿不到签发时间时证明不了这张票是新的，
+     * 只能当旧的处理（见 StaffTokenRevoker.isRevoked）。
+     *
+     * 注意 iat 是**秒**精度（JWT 的 NumericDate 就是秒），下面比对时的方向
+     * 和由此产生的亚秒级窗口，在 StaffTokenRevoker 的类注释里讲清楚了。
+     */
+    public Date getIssuedAt(String token) {
+        return parseToken(token).getIssuedAt();
+    }
+
     /** 从 Token 取身份类型（staff=员工 customer=顾客） */
     public String getType(String token) {
         return parseToken(token).get("type", String.class);

@@ -10,20 +10,57 @@
         <result column="name"    property="name"/>
         <result column="address" property="address"/>
         <result column="phone"   property="phone"/>
+        <result column="status"  property="status"/>
     </resultMap>
 
-    <!-- 两条都显式列出字段，不用 SELECT *：status 不在这张 resultMap 里，
-         哪天表加了大字段（图片、协议文本），SELECT * 会把它们全捞回来 -->
+    <!-- 所有语句都显式列出字段，不用 SELECT *：
+         哪天表加了大字段（图片、协议文本），SELECT * 会把它们全捞回来。
+
+         注意 selectOpen / selectOpenById 的 status=1 写在 **WHERE** 里，
+         不是查回来在 Java 里 if —— 这是这两条查询的全部意义（能查到 = 在营业）。
+         selectAll / selectById 反过来，不过滤。哪条是哪条，看方法名。 -->
     <select id="selectOpen" resultMap="StoreResultMap">
-        SELECT id, name, address, phone
+        SELECT id, name, address, phone, status
         FROM stores
         WHERE status = 1
         ORDER BY id
     </select>
 
     <select id="selectOpenById" resultMap="StoreResultMap">
-        SELECT id, name, address, phone
+        SELECT id, name, address, phone, status
         FROM stores
         WHERE id = #{id} AND status = 1
     </select>
+
+    <select id="selectAll" resultMap="StoreResultMap">
+        SELECT id, name, address, phone, status
+        FROM stores
+        ORDER BY id
+    </select>
+
+    <select id="selectById" resultMap="StoreResultMap">
+        SELECT id, name, address, phone, status
+        FROM stores
+        WHERE id = #{id}
+    </select>
+
+    <!-- create_time / update_time 不在这条 INSERT 里：
+         两列在 DDL 里是 DEFAULT CURRENT_TIMESTAMP / ON UPDATE CURRENT_TIMESTAMP，
+         数据库自己会填。手工塞一遍等于把"什么时候建的"变成应用的责任，
+         而这个应用压根不知道时钟准不准（多实例部署时更是各写各的） -->
+    <insert id="insert" parameterType="com.yunxi.infrastructure.persistence.po.StorePO"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO stores (name, address, phone, status)
+        VALUES (#{name}, #{address}, #{phone}, #{status})
+    </insert>
+
+    <!-- 同样不写 update_time：它在 DDL 里是 ON UPDATE CURRENT_TIMESTAMP -->
+    <update id="update" parameterType="com.yunxi.infrastructure.persistence.po.StorePO">
+        UPDATE stores
+        SET name    = #{name},
+            address = #{address},
+            phone   = #{phone},
+            status  = #{status}
+        WHERE id = #{id}
+    </update>
 </mapper>

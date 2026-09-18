@@ -1,5 +1,15 @@
 package com.yunxi.infrastructure.persistence.po;
 
+/**
+ * 员工表 staff 的数据库映射对象。
+ *
+ * 注意列名是 password、字段名也是 password —— 只有 domain 的 Staff 管它叫
+ * passwordHash（那一层要强调"这是哈希不是明文"）。改名的活在
+ * StaffRepositoryImpl.toStaff 里做。
+ *
+ * 不映射 create_time / update_time：没有任何响应显示它们，
+ * DDL 里 DEFAULT CURRENT_TIMESTAMP / ON UPDATE 已经把两列填好了。
+ */
 public class StaffPO {
 
     private Long id;

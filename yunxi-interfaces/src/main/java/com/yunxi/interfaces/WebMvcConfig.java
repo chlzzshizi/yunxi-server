@@ -1,6 +1,7 @@
 package com.yunxi.interfaces;
 
 
+import com.yunxi.application.service.StaffTokenRevoker;
 import com.yunxi.interfaces.security.JwtInterceptor;
 import com.yunxi.interfaces.security.JwtUtil;
 import org.springframework.context.annotation.Configuration;
@@ -16,15 +17,18 @@ public class WebMvcConfig implements WebMvcConfigurer {
 
     private final JwtUtil jwtUtil;
     private final StringRedisTemplate redisTemplate;
+    private final StaffTokenRevoker tokenRevoker;
 
-    public WebMvcConfig(JwtUtil jwtUtil, StringRedisTemplate redisTemplate) {
+    public WebMvcConfig(JwtUtil jwtUtil, StringRedisTemplate redisTemplate,
+                        StaffTokenRevoker tokenRevoker) {
         this.jwtUtil = jwtUtil;
         this.redisTemplate = redisTemplate;
+        this.tokenRevoker = tokenRevoker;
     }
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(new JwtInterceptor(jwtUtil, redisTemplate))
+        registry.addInterceptor(new JwtInterceptor(jwtUtil, redisTemplate, tokenRevoker))
                 .addPathPatterns("/api/**")              // 拦截所有 API
                 .excludePathPatterns(
                         "/api/auth/**",                  // 注册/登录/登出不需要 Token

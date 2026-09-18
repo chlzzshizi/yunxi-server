@@ -1,6 +1,7 @@
 package com.yunxi.interfaces.security;
 
 
+import com.yunxi.application.service.StaffTokenRevoker;
 import com.yunxi.common.BusinessException;
 import com.yunxi.common.enums.StaffRole;
 import jakarta.servlet.http.HttpServletRequest;
@@ -15,10 +16,13 @@ public class JwtInterceptor implements HandlerInterceptor {
 
     private final JwtUtil jwtUtil;
     private final StringRedisTemplate redisTemplate;
+    private final StaffTokenRevoker tokenRevoker;
 
-    public JwtInterceptor(JwtUtil jwtUtil, StringRedisTemplate redisTemplate) {
+    public JwtInterceptor(JwtUtil jwtUtil, StringRedisTemplate redisTemplate,
+                          StaffTokenRevoker tokenRevoker) {
         this.jwtUtil = jwtUtil;
         this.redisTemplate = redisTemplate;
+        this.tokenRevoker = tokenRevoker;
     }
 
     @Override
@@ -54,20 +58,39 @@ public class JwtInterceptor implements HandlerInterceptor {
         if ("customer".equals(type)) {
             request.setAttribute("customerId", jwtUtil.getCustomerId(token));
         } else {
-            request.setAttribute("staffId", jwtUtil.getStaffId(token));
+            Long staffId = jwtUtil.getStaffId(token);
+            request.setAttribute("staffId", staffId);
             request.setAttribute("username", jwtUtil.getUsername(token));
             request.setAttribute("role", jwtUtil.getRole(token));
             request.setAttribute("storeId", jwtUtil.getStoreId(token)); // 旧 token 无此 claim 时为 null
+
+            // 4.5 这张票被作废了没（停用 / 降级 / 调岗 / 改密码 —— 见 StaffTokenRevoker）。
+            //
+            // 为什么排在角色闸门**之前**：一个被停用的管理员不该听到
+            // "员工与门店管理只对管理员开放，请使用管理员账号" —— 那句话把他
+            // 指向一个他做不到的动作（他连登录都登不进来）。"你的登录已经作废"
+            // 是比"你这个角色不能来这"更前置、更可行动的事实（Bug 20 的教训：
+            // 报错要指向真正的原因）。
+            if (tokenRevoker.isRevoked(staffId, jwtUtil.getIssuedAt(token))) {
+                throw new BusinessException(401, "账号已被停用或权限已变更，请重新登录");
+            }
         }
 
-        // 5. 角色闸门（管理员能碰哪些 URL）
+        // 5. 角色闸门（管理员能碰哪些 URL、哪些 URL 只许管理员碰）
         checkRoleGate(request, type, token);
 
         return true;  // 放行
     }
 
     /**
-     * 角色闸门 —— 管理员（role=0）不参与日常经营。
+     * 角色闸门 —— 双向的两类规则。
+     *
+     * **方向一（2026-09-18 新增）：某些 URL 只对管理员开放 ⇒ 拦店长。**
+     * **方向二（原有）：管理员不参与日常经营 ⇒ 拦管理员。**
+     *
+     * 两条方向相反，读的时候别串了。方向一必须写在方向二**前面**：
+     * 方向二开头就是 `if (role != ADMIN) return;`，店长在那里直接放行了 ——
+     * 那种写法根本没有地方安放"这个前缀不许店长进"。
      *
      * 为什么这条规则住在拦截器、而不是各个 Controller 或应用服务里：
      *   设计文档 §6.4 是**按 URL 写**的（"`/api/orders/**` 一律 403"、"定价写=店长"），
@@ -86,10 +109,36 @@ public class JwtInterceptor implements HandlerInterceptor {
             return;
         }
         Integer role = jwtUtil.getRole(token);
-        if (role == null || role != StaffRole.ADMIN.getCode()) {
-            return;   // 店长：订单与定价都是他的本职，全放行
-        }
         String uri = request.getRequestURI();
+
+        // ── 方向一：管理员专区 ⇒ 拦店长（2026-09-18 新增）──
+        //
+        // 闸门原来只有方向二，而方向二的第一句就是"不是管理员就放行"，
+        // 于是**店长能到达任何一个 URL**。"只许管理员进"这个方向在代码里
+        // 从来不存在 —— 员工管理一落地，它就必须存在了，否则店长能建号、
+        // 能改别人的角色、能停用管理员。
+        //
+        // 门店这条**必须按方法分**（GET 放行、其余拦），不能按前缀一刀切：
+        //   · 门店的读对所有员工（和顾客）开放是既有口径（§6.4「任意有效 token」）
+        //   · verify-stores.sh 有一条断言硬钉着"管理员 GET /api/stores 必须 200"
+        //     （B9b）—— 按前缀一刀切会把它变成 403，那条断言就红了
+        //   · 而且"能下单的店"本来就该让所有人看得见，看不到店就没法下单
+        //
+        // /api/staff 则是整个前缀（含读）都归管理员，理由写在 StaffController 的类注释里。
+        //
+        // 顺带：这里不会误伤 /api/auth/staff/login 之类 ——
+        // "/api/auth/..." 第 6 个字符是 'a' 不是 's'，前缀根本对不上；
+        // 而且 /api/auth/** 本来就被 WebMvcConfig 排除在拦截器之外，两层都安全。
+        boolean adminOnly = uri.startsWith("/api/staff")
+                || (uri.startsWith("/api/stores") && !"GET".equalsIgnoreCase(request.getMethod()));
+        if (adminOnly && (role == null || role != StaffRole.ADMIN.getCode())) {
+            throw new BusinessException(403, "员工与门店管理只对管理员开放，请使用管理员账号");
+        }
+
+        // ── 方向二：管理员不参与日常经营 ⇒ 拦管理员（原有三条，一个字没改）──
+        if (role == null || role != StaffRole.ADMIN.getCode()) {
+            return;   // 店长：订单与定价都是他的本职，以下三条都不关他的事
+        }
         if (uri.startsWith("/api/orders")) {
             // 含读接口：管理员连"看一眼订单列表"都不需要，
             // 放开读只会让"他到底能不能管订单"这个问题重新变模糊

@@ -16,8 +16,58 @@
         <result column="status"      property="status"/>
     </resultMap>
 
+    <!-- 列清单显式写出来，不用 SELECT *。
+         原来这里就是 SELECT *（那时它是本文件唯一一条语句，能跑就没人管）。
+         2026-09-18 加下面几条时一并改成显式列 —— 同一个文件里
+         "三条显式 + 一条通配"是下一个人最容易照着抄错的那一半。 -->
     <select id="selectByUsername" resultMap="StaffResultMap">
-        SELECT * FROM staff WHERE username = #{username}
+        SELECT id, username, password, name, role, store_id, phone, status
+        FROM staff
+        WHERE username = #{username}
+    </select>
+
+    <select id="selectById" resultMap="StaffResultMap">
+        SELECT id, username, password, name, role, store_id, phone, status
+        FROM staff
+        WHERE id = #{id}
+    </select>
+
+    <!-- 含已停用的员工：管理员要能看见自己停掉的人，不然没法把他启用回来 -->
+    <select id="selectAll" resultMap="StaffResultMap">
+        SELECT id, username, password, name, role, store_id, phone, status
+        FROM staff
+        ORDER BY id
+    </select>
+
+    <!-- create_time / update_time 不在这条 INSERT 里：DDL 里两列是
+         DEFAULT CURRENT_TIMESTAMP / ON UPDATE CURRENT_TIMESTAMP，数据库自己填。
+         手工塞一遍等于把"什么时候建的"变成应用的责任，而应用不知道时钟准不准。
+         status 由应用层显式传（不靠默认值）—— 停用/启用是本功能的核心，
+         依赖列默认值会让"到底谁决定的新账号是启用的"变得含糊 -->
+    <insert id="insert" parameterType="com.yunxi.infrastructure.persistence.po.StaffPO"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO staff (username, password, name, role, store_id, phone, status)
+        VALUES (#{username}, #{password}, #{name}, #{role}, #{storeId}, #{phone}, #{status})
+    </insert>
+
+    <!-- **没有 username**：它是登录身份，还签在 token 的 subject 里，建后不可改。
+         不把它写进 UPDATE 语句，比在 Java 里"记得别改"强 —— 少一个能改的地方。
+         （StaffRepositoryImpl.update 传进来的 PO 里带着 username，这里刻意忽略它） -->
+    <update id="update" parameterType="com.yunxi.infrastructure.persistence.po.StaffPO">
+        UPDATE staff
+        SET password = #{password},
+            name     = #{name},
+            role     = #{role},
+            store_id = #{storeId},
+            phone    = #{phone},
+            status   = #{status}
+        WHERE id = #{id}
+    </update>
+
+    <!-- 只回一个计数，不把整行捞回来：这里只问"占没占"，
+         而 username 上有 uk_username，计数只可能是 0 或 1 -->
+    <select id="countByUsername" resultType="int">
+        SELECT COUNT(*) FROM staff WHERE username = #{username}
     </select>
 
 </mapper>
