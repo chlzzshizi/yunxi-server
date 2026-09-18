@@ -28,6 +28,7 @@ import org.springframework.dao.DuplicateKeyException;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -212,6 +213,78 @@ class OrderAppServiceTest {
                     .hasMessageContaining("至少需要一条明细");
 
             verify(orderRepository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("明细列表整个为 null → 400，不落库")
+        void nullItemsRejected() {
+            // isEmpty() 那条上面测过（传 List.of()）。这条守的是 null ——
+            // 它只可能来自非 HTTP 入口（定时任务、脚本、第二个前端），
+            // 而在那些入口上 NPE 会报成 500，看不出是"调用方没传明细"
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    STORE_A, 100L, OrderSource.STORE, null, 9L, OrderExtras.EMPTY, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("至少需要一条明细");
+
+            verify(orderRepository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("门店单不填预约时间/备注（extras=null）→ 照常建单，三列都空")
+        void storeOrderWithoutExtras() {
+            // 柜台最常见的那一单：顾客把衣服放下就走，员工什么都不填。
+            // extras 为 null 时**跳过** fillOrderInfo（不走"全 null 就 return"那条），
+            // 两条路的终点看起来一样，但只有这条能证明"没填附加信息"不会把单卡住
+            Result<OrderView> result = orderAppService.createOrder(
+                    STORE_A, 100L, OrderSource.STORE, items, 9L, null, null);
+
+            assertThat(result.code()).isEqualTo(200);
+            assertThat(result.data().appointmentTime()).isNull();
+            assertThat(result.data().deliveryAddress()).isNull();
+            assertThat(result.data().remark()).isNull();
+            verify(orderRepository).save(any());
+        }
+
+        @Test
+        @DisplayName("明细缺字段 → 400 带序号（第 N 条），且在算价之前就被拦下")
+        void rejectIncompleteItems() {
+            // 应用层这层"字段全不全"的校验是给**非 HTTP 入口**留的（类注释：
+            // 将来还会有定时任务、后台脚本、第二个前端）。controller 那份管文案，
+            // 这份管"从别的门进来也拦得住" —— 所以这里测的是缺字段的**每一种**形状
+            assertThatThrownBy(() -> orderAppService.createOrder(STORE_A, 100L,
+                    OrderSource.STORE,
+                    List.of(new OrderItemCommand(null, 1L, 2, null)),
+                    9L, OrderExtras.EMPTY, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("第 1 条明细缺少");
+
+            assertThatThrownBy(() -> orderAppService.createOrder(STORE_A, 100L,
+                    OrderSource.STORE,
+                    List.of(new OrderItemCommand(1L, null, 2, null)),
+                    9L, OrderExtras.EMPTY, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("第 1 条明细缺少");
+
+            assertThatThrownBy(() -> orderAppService.createOrder(STORE_A, 100L,
+                    OrderSource.STORE,
+                    List.of(new OrderItemCommand(1L, 1L, null, null)),
+                    9L, OrderExtras.EMPTY, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("第 1 条明细缺少");
+
+            // 序号 = 下标 + 1：坏的是第 2 条就必须报 2 —— 报成 0 或 1 会让人
+            // 去改一条好明细，而真正有问题的那条一直在。List.of 不收 null 元素，
+            // 「整条是 null」这种坏形状只能用 Arrays.asList 造
+            assertThatThrownBy(() -> orderAppService.createOrder(STORE_A, 100L,
+                    OrderSource.STORE,
+                    Arrays.asList(new OrderItemCommand(1L, 1L, 2, null), null),
+                    9L, OrderExtras.EMPTY, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("第 2 条明细缺少");
+
+            verify(orderRepository, never()).save(any());
+            // 形状都没对上就别白查一次价目表（"校验在算价之前"）
+            verify(priceRepository, never()).findPricesByCategoryIds(any());
         }
     }
 
@@ -415,6 +488,47 @@ class OrderAppServiceTest {
                     .hasMessageContaining("至少需要一条明细");
 
             verify(priceRepository, never()).findPricesByCategoryIds(any());
+        }
+
+        @Test
+        @DisplayName("分类有价、但**没有这一种洗法** → 400，同样带序号")
+        void priceRowMissingForThisWashType() {
+            // 和上面 missingPriceRow 是 matchPrice 里两个不同的 return null：
+            //   上面那条：这个分类一行价都没有   → 整张价目表没配
+            //   这条    ：有价、但缺这一种洗法   → 漏配了一种（今天只配了普洗，顾客选了单熨）
+            // 排查方向完全不同，所以两条都得有 —— 只留一条的话，另一条的
+            // 文案/序号坏了没人知道，而它们都是给管理员看的线索
+            when(priceRepository.findPricesByCategoryIds(any())).thenReturn(Map.of(
+                    1L, List.of(new ClothesPrice(1L, 1L, new BigDecimal("15.00")))));
+
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    STORE_A, 100L, OrderSource.STORE,
+                    List.of(new OrderItemCommand(1L, 3L, 2, null)), 9L, OrderExtras.EMPTY, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("第 1 条明细的衣物分类或洗涤方式不存在")
+                    .hasMessageContaining("洗涤方式 3");
+
+            verify(orderRepository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("洗法在价目表里有、在 wash_types 里查不到名 → 文案退化成编号，不是 NPE")
+        void washTypeNameFallsBackToId() {
+            // 数据不一致时的样子：价目表里有一行 (13, 3)、但 wash_types 读回来
+            // 只有 1 号。报错文案要还能出得来 —— 这句文案是给管理员定位配置用的，
+            // 它自己再炸一次（NPE 或 "null"）等于把线索弄丢了
+            when(priceRepository.findPricesByCategoryIds(any())).thenReturn(Map.of(
+                    13L, List.of(new ClothesPrice(13L, 3L, new BigDecimal("0.00")))));
+            when(priceRepository.findCategoryById(13L))
+                    .thenReturn(Optional.of(category(13L, "羽绒服")));
+            when(priceRepository.findAllWashTypes())
+                    .thenReturn(List.of(washType(1L, "普洗")));
+
+            assertThatThrownBy(() -> orderAppService.createOrder(
+                    STORE_A, 100L, OrderSource.STORE,
+                    List.of(new OrderItemCommand(13L, 3L, 1, null)), 9L, OrderExtras.EMPTY, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("「羽绒服」不支持「洗涤方式 3」");
         }
 
         @Test
@@ -854,6 +968,73 @@ class OrderAppServiceTest {
     }
 
     // ════════════════ 顾客在线支付 ════════════════
+
+    @Nested
+    @DisplayName("洗后付结账（员工）")
+    class FinalPay {
+
+        /**
+         * 一张走到「待取件」(5) 的门店单：下单时走洗后付（先付 0 占位），
+         * 衣服洗完还没结账 —— 这正是 finalPay 存在的那个时刻。
+         */
+        private Order awaitingFinalPay() {
+            Order order = persistedOrder(1L, STORE_A, CUSTOMER);
+            order.pay(PayMethod.CASH, BigDecimal.ZERO);   // 洗后付：先付传 0
+            order.updateStatus();   // 2 → 3
+            order.updateStatus();   // 3 → 4
+            order.updateStatus();   // 4 → 5（门店单走 5，网单才走 6）
+            stubFind(order);
+            return order;
+        }
+
+        @Test
+        @DisplayName("5 态结账 → 收全额、记下洗后付方式、状态 5→7，并记操作人")
+        void settlesAtPickup() {
+            Order order = awaitingFinalPay();
+
+            Result<Void> result = orderAppService.finalPay(1L, PayMethod.ALIPAY, 9L);
+
+            assertThat(result.code()).isEqualTo(200);
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.COMPLETED);
+            // 金额来自订单，不是调用方传的 —— 端点上没有可篡改的数字
+            assertThat(order.getPaidAmount()).isEqualByComparingTo(TOTAL);
+            assertThat(order.getFinalPayMethod()).isEqualTo(PayMethod.ALIPAY);
+            assertThat(order.getStaffId()).isEqualTo(9L);
+            // 状态写入只能从这一句出去（§11.4），且期望状态是结账**之前**的 5
+            verify(orderRepository).updateStatusCas(order, OrderStatus.PENDING_PICKUP);
+        }
+
+        @Test
+        @DisplayName("顾客 token → 401，且**根本不看订单**（先验人、后查单）")
+        void requiresStaff() {
+            assertThatThrownBy(() -> orderAppService.finalPay(1L, PayMethod.CASH, null))
+                    .isInstanceOf(BusinessException.class)
+                    .extracting("code").isEqualTo(401);
+
+            // 顺序：requireStaff 在 load 之前。反过来的话，顾客拿一个不存在的
+            // 单号会收到 404 —— 那等于用错误码告诉他"这个单号是真的，只是不归你"
+            verify(orderRepository, never()).findById(any());
+        }
+
+        @Test
+        @DisplayName("还没洗到 5 态（3 态）→ 400，一分钱不动、不写库")
+        void wrongStatus() {
+            Order order = persistedOrder(1L, STORE_A, CUSTOMER);
+            order.pay(PayMethod.CASH, BigDecimal.ZERO);
+            order.updateStatus();   // 2 → 3
+            stubFind(order);
+
+            assertThatThrownBy(() -> orderAppService.finalPay(1L, PayMethod.CASH, 9L))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("不允许洗后付结账");
+
+            // 领域层的判据在上面已经报错了，这里守的是"应用层没有抢在领域之前动手"
+            assertThat(order.getPaidAmount()).isEqualByComparingTo(BigDecimal.ZERO);
+            assertThat(order.getFinalPayMethod()).isNull();
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.WASHING);
+            verify(orderRepository, never()).updateStatusCas(any(), any());
+        }
+    }
 
     @Nested
     @DisplayName("顾客在线支付")

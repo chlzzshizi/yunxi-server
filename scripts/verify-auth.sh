@@ -52,7 +52,10 @@ db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N \
 
 # 每次运行用不同手机号：固定号第二次跑就变"重复注册"，B1 会莫名其妙红
 PHONE_NEW="137$(date +%s | tail -c 9)"
-PHONE_ABSENT="138$(date +%s | tail -c 9)"
+# 原先这里还有 PHONE_ABSENT（一个"库里肯定没有"的号），只服务两条探针：
+# C3「手机号不存在 → 同一句」和 D5「注册缺 password → 400」。两条都搬进了
+# CustomerAuthAppServiceTest（badCredentialsAreIndistinguishable / rejectBlankFields），
+# 没有别的用处了，跟着一起删
 PHONE_NOPWD="13700000002"
 
 echo "########## 准备：脚手架 ##########"
@@ -91,6 +94,24 @@ NP_PWD=$(db "select ifnull(password,'<NULL>') from customers where phone='$PHONE
 if [ "$NP_PWD" != "<NULL>" ]; then
   echo "==> [准备失败] $PHONE_NOPWD 的 password 应为 NULL，实际 '$NP_PWD'"; exit 1
 fi
+
+# 手机号判**形状**（恰好 11 位数字）。PHONE_NEW 是脚本自己拼的
+# （date +%s | tail -c 9），拼歪了后端回 400「手机号格式不正确」，
+# 而 B1 只会报"注册没 200" —— 真因看不见（**Bug 38** 的形状）。
+# PHONE_NOPWD 是写死的脚手架的一部分（见文件头），钉形状等于同时钉住"这行还在不在"
+for p in "$PHONE_NEW" "$PHONE_NOPWD"; do
+  case "$p" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) echo "==> [准备失败] 手机号 '$p' 不是 11 位数字"; exit 1;;
+  esac
+done
+
+# 本脚本**故意没有**"票非空"那一步自检 —— 别处（price / coupons / orders）的
+# 准备段要先拿到票才能干活，票空了后面全是假红；而**本脚本的被测对象就是登录本身**，
+# 票是 A1/A1b（员工）、B1（顾客）**测出来的结果**，不是前提。在这儿先登一次，
+# 等于拿被测的东西给自己当脚手架：登录真坏了，报出来的是"准备失败"，
+# 把 A1 该报的那条红顶掉。所以票的断言留在 A1b（非空 + 印长度）。
+# 准备段管到底的只有三件**真前提**：停用账号 status=0、它的名字字节、无密码顾客 NULL
 echo "  脚手架就绪：mgr_disabled(停用)  $PHONE_NOPWD(无密码顾客)  新号 $PHONE_NEW"
 echo
 
@@ -111,11 +132,10 @@ check "A2 密码错 → 401 用户名或密码错误" \
      -d '{"username":"manager","password":"wrong-password"}')" \
   "用户名或密码错误"
 
-# 用户名不存在必须报**同一句话**，否则攻击者能靠报错差异枚举出哪些用户名存在
-check "A3 用户名不存在 → 401 同一句（不可枚举用户名）" \
-  "$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
-     -d '{"username":"no-such-user-xyz","password":"admin123"}')" \
-  "用户名或密码错误"
+# 「用户名不存在必须报**同一句话**，否则攻击者能靠报错差异枚举出哪些用户名存在」
+# —— 这条规则还在，只是搬进了单测：StaffAuthAppServiceTest 里 unknownUser 与
+# wrongPassword 是**成对**的两条，各自断言对方那句话，比这里只钉一侧更严。
+# 「不可枚举」这个性质本来就要两句话对照才成立，一条脚本断言只是它的一半。
 
 check "A4 密码对但账号被停用 → 403 账号已被停用" \
   "$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
@@ -155,7 +175,9 @@ checkNot "B3c 新顾客的档案里没有姓名（线上注册确实不知道他
 # [$] 是 grep 里的字面 $，避免在 shell 里转义得眼瞎
 HASH=$(db "select password from customers where phone='$PHONE_NEW';")
 check "B4 入库的是 BCrypt 哈希（查库，不是看接口回显）" "$HASH" '^[$]2a[$]10[$]'
-checkNot "B4b 库里不是明文密码" "$HASH" '123456'
+# 原先还有一条 B4b「库里不是明文密码」（checkNot '123456'）：'$2a$10$' 这个锚
+# 已经蕴含了它，而"入库前先加密"本身在 CustomerAuthAppServiceTest.hashesPasswordBeforeSaving
+# 里有一条更直接的（验的是 encoder 被调用过，不是靠字符串猜）
 
 echo
 echo "########## C. 顾客登录 ##########"
@@ -169,10 +191,9 @@ check "C2 密码错 → 401 手机号或密码错误" \
      -d "{\"phone\":\"$PHONE_NEW\",\"password\":\"wrong-password\"}")" \
   "手机号或密码错误"
 
-check "C3 手机号不存在 → 401 同一句（不可枚举手机号）" \
-  "$(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application/json" \
-     -d "{\"phone\":\"$PHONE_ABSENT\",\"password\":\"123456\"}")" \
-  "手机号或密码错误"
+# C3「手机号不存在 → 401 同一句（不可枚举手机号）」同上，搬进单测：
+# CustomerAuthAppServiceTest.badCredentialsAreIndistinguishable 一条里把
+# "两种失败逐字同句"讲完了（名字里就写着防枚举）
 
 # 门店单顾客（到店自动建档，password 为 NULL）——password 为 null 时直接
 # matches 会抛异常，必须显式挡掉，所以这条是个正儿八经的规则
@@ -191,8 +212,9 @@ echo "########## D. 缺参数：也不许把内部原文漏出去（Bug 23）###
 # —— BCryptPasswordEncoder.matches(null,..) 抛的英文原文被全局处理器原样透传。
 #
 # 修完之后的规矩：**用户看得到的 message 里不许有英文**。框架异常的消息都是英文、
-# 写给开发者的，这就是它的指纹；业务失败一律回中文那句。所以每条都验两件事：
-# 回的是哪个码哪句话，以及消息里有没有混进英文。
+# 写给开发者的，这就是它的指纹；业务失败一律回中文那句。所以每条都验"回的是哪个码
+# 哪句话"；而"没有英文"这一条属性现在只在 D1c 上验一次（原先三条请求各验一遍，
+# 是同一属性的三份拷贝）—— 属性本身归 GlobalExceptionHandlerTest 那五条通道守着
 
 D1=$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
        -d '{"username":"manager"}')
@@ -205,12 +227,10 @@ checkNot "D1c 消息里没有英文原文（rawPassword…）" "$(jqf "$D1" mess
 D2=$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
        -d '{"password":"admin123"}')
 check   "D2 员工登录缺 username → 401 同一句" "$D2" "用户名或密码错误"
-checkNot "D2b 消息里没有英文" "$(jqf "$D2" message)" '[A-Za-z]'
 
 D3=$(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application/json" \
        -d "{\"phone\":\"$PHONE_NEW\"}")
 check   "D3 顾客登录缺 password → 401 手机号或密码错误" "$D3" "手机号或密码错误"
-checkNot "D3b 消息里没有英文" "$(jqf "$D3" message)" '[A-Za-z]'
 
 # 守卫放在 hasPassword 之后：门店单顾客没带密码时，该看到的仍是"去注册"，
 # 而不是通用那句 —— 提前拦等于把唯一的出路藏起来
@@ -218,10 +238,9 @@ D4=$(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application
        -d "{\"phone\":\"$PHONE_NOPWD\"}")
 check "D4 门店单顾客 + 没带密码 → 仍回「未设置密码，请先注册」" "$D4" "该手机号未设置密码，请先注册"
 
-D5=$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
-       -d "{\"phone\":\"$PHONE_ABSENT\"}")
-check   "D5 顾客注册缺 password → 400 手机号和密码不能为空" "$D5" "手机号和密码不能为空"
-checkNot "D5b 消息里没有英文" "$(jqf "$D5" message)" '[A-Za-z]'
+# 原先这里还有 D5「顾客注册缺 password → 400 手机号和密码不能为空」（连带 D5b）：
+# 同一个端点、同一句话，B3 缺 phone 那条已经在钉了；这条规则的完整版（手机号/密码
+# 任一为空）在 CustomerAuthAppServiceTest.rejectBlankFields 里
 
 echo
 echo "########## E. 注册口径（2026-09-12：只要手机号 + 密码）##########"

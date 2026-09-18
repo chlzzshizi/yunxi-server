@@ -51,6 +51,18 @@ public class CouponAppService {
      * 店长发券
      */
     public Result<CouponPO> createCoupon(CouponPO coupon) {
+        // 折扣率范围守在**建券**这一刻：0 < discount <= 1（0.50 = 5 折、1 = 不打折）。
+        // 越界的券建得出来却永远用不掉 —— Order.applyCoupon:150-153 到**用券时**才抛
+        // "优惠券折扣率不合法"，那时券已经躺在库里、顾客也抢到手了，报错的人
+        // （顾客）跟填错的人（店长）不是同一个。建的时候拦下来，填错的人当场看到。
+        //
+        // ⚠️ 它挡住的是"建了一张永远用不掉的券"，**不是**"一折券" —— 0.01 落在 (0,1] 里，
+        // 那条路只能靠 Controller 的身份闸（2026-09-18 Bug 42 的两半，别记混）
+        if (coupon.getDiscount() == null
+                || coupon.getDiscount().compareTo(BigDecimal.ZERO) <= 0
+                || coupon.getDiscount().compareTo(BigDecimal.ONE) > 0) {
+            return Result.fail(400, "折扣率必须大于 0 且不超过 1（0.50 = 5 折）");
+        }
         coupon.setStatus(1);  // 未开始
         couponMapper.insert(coupon);
         // 库存预热到 Redis

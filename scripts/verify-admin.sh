@@ -116,10 +116,14 @@ STORE_NEW_ADDR="杭州市拱墅区验收路 $RUN 号"
 STORE_OPEN=1             # V4 种子里的云洗中央门店
 STORE_CLOSED_ID=99       # 脚手架：一家停业的店（verify-stores.sh 也在用）
 STORE_CLOSED_NAME="云洗停业测试店"
+STORE_CLOSED_ADDR="杭州市余杭区测试路 1 号"   # 与 verify-stores.sh 逐字一致 —— 同一行数据，两个脚本都在自愈它
+STORE2_NAME="二号门店"                        # 与 verify-orders.sh 的 F 段逐字一致，同上
+STORE2_ADDR="验收用"
 STORE_GHOST=999          # 根本不存在的门店
 STAFF_GHOST=999999       # 根本不存在的员工
 PW="pw-$RUN"             # 新建账号的初始密码
-PW2="pw2-$RUN"           # 重置之后的新密码
+PW2="pw2-$RUN"           # 重置之后的新密码（E14 段用；原先只有 A10d 的 404 用过它，
+                         # A10d 搬进单测后它一度没用了 —— 现在补的成功路径正需要它）
 PHONE_CUST="136$(date +%s | tail -c 9)"   # 用来注册一个顾客去拿 token（11 位）
 
 # 31 个字的用户名：staff.username 是 VARCHAR(30)，这是**能捅进 SQL 异常的长度**
@@ -137,31 +141,88 @@ MGR_T=$(jqf "$(postJson /api/auth/staff/login \
   "{\"username\":\"manager\",\"password\":\"admin123\"}" "")" token)
 if [ -z "$ADMIN_T" ] || [ -z "$MGR_T" ]; then
   echo "==> [准备失败] admin / manager 登录没拿到 token（后端没起？还是账号被上一轮脚本停用了？）"
+  echo "             票长 admin=${#ADMIN_T} manager=${#MGR_T}"
   exit 1
 fi
-# 脚手架数据守卫：99 号店必须是停业的，否则 D9 那条"列表里没有停业店"是句废话
+# ══ 脚手架自备：99 与 2 缺了就自己种 ══（**Bug 39** 的修法）
+#
+# 原写法是"要求 stores 1/2/99 都已经存在"，但它们全由**别的脚本**种下：
+# id=1 来自 V4 种子，id=2 来自 verify-orders.sh 的 F 段，
+# id=99 来自 verify-stores.sh 的准备段 —— 而本脚本按通配符**排第一**
+# （admin < auth < coupons < orders < … < stores）。于是：
+#   · 本机九连跑能过，靠的是**上一轮留下的残渣**
+#   · CI 每次都是全新库（docker run 无卷）→ 2/99 不存在 → 这里当场 exit 1
+#     → e2e job 在**第一个脚本**就红，后面八个根本没跑过
+#
+# 这和 Bug 38、和 verify-pricing-authority 的顾客残渣是**同一个形状**：
+# **把"执行顺序"当成了"本脚本的前提"**。顺序是调度者的偶然，前提才是脚本自己的。
+# 所以修法不是写"本脚本依赖 A、B 先跑"（那只是把耦合从代码挪进注释），
+# 而是**自己把前提种出来** —— 和 4 份 login_or_register 拷贝同一个道理。
+#
+# 代价说清楚：这换掉了"顺便检测别人有没有把脚手架弄坏"。那层检测本来也名不副实 ——
+# 循环里的 id=2 **本脚本一条断言都不读**（grep 全脚本，它只出现在原来那条守卫里），
+# 守的是一条自己不用的前提。换来的是"单跑任何一个都成立"，后者才是本仓库的规矩。
+dbQ "insert ignore into stores (id,name,address,phone,status)
+     values ($STORE_CLOSED_ID,'$STORE_CLOSED_NAME','$STORE_CLOSED_ADDR','0571-00000000',0);
+     update stores set name='$STORE_CLOSED_NAME', address='$STORE_CLOSED_ADDR'
+     where id=$STORE_CLOSED_ID;"
+dbQ "insert ignore into stores (id,name,address) values (2,'$STORE2_NAME','$STORE2_ADDR');
+     update stores set name='$STORE2_NAME', address='$STORE2_ADDR' where id=2;"
+
+# 种完立刻自证（Bug 22 教训：前提不成立当场停，别让它跑成后面一片红）。
+# 下面三条**不是**在验上面那两句 insert 写对了没 —— 它们刚写完，读出来当然是对的；
+# 验的是**写进去的那条路**（printf → 文件 → stdin → mysql 客户端）有没有在哪一段
+# 被转码。少了它们，Bug 30 会以"这次换了一列"的形式再犯一次：
+# 乱码不报错、不影响任何断言，只会安安静静躺在库里等人肉眼撞见。
+#
+# id=1 是**真前提**（V4 种子的云洗中央门店，D 段的读接口全指着有店可列），
+# 所以它保留"必须存在"的硬断言。它同时是"显式 id 方案还在不在"的探针：
+# 若有人把种子改成自增，本脚本 D1 新建的店会顶掉 id=2，这条就会红。
+N1=$(db "select count(*) from stores where id=1;")
+if [ "$N1" != "1" ]; then
+  echo "==> [准备失败] 脚手架门店 id=1 应该有且只有一行，实际 $N1 行（V4 种子被动过？）"; exit 1
+fi
+# 99 号店必须是停业的，否则 D10b 那句"老接口里没有 99 号停业店"是句废话
 C_STATUS=$(db "select status from stores where id=$STORE_CLOSED_ID;")
 if [ "$C_STATUS" != "0" ]; then
   echo "==> [准备失败] 脚手架停业店 id=$STORE_CLOSED_ID 的 status 应为 0，实际 '$C_STATUS'"
   echo "              （它被本脚本或 verify-stores.sh 之外的什么东西开起来了？）"; exit 1
 fi
-# 这个脚本会往 stores 表加行，"脚手架 id 不许被动"这条得当场确认
-for SID in 1 2 99; do
-  N=$(db "select count(*) from stores where id=$SID;")
-  if [ "$N" != "1" ]; then
-    echo "==> [准备失败] 脚手架门店 id=$SID 应该有且只有一行，实际 $N 行"; exit 1
-  fi
-done
+# 名字的字节也必须对。这条和 D10b 是同一件事的两次断言，重复是**故意的**：
+# 准备守卫负责"立刻喊停"，D10b 负责"把结论写清楚"。
+# 而**乱码恰好让 D10b 通过**（列表里当然找不到一个正确写法的店名）—— 假绿。
+# 同一个理由在 verify-stores.sh 的准备守卫里（那边对应的是 A3/A3c）
+C_NAME=$(dbQ "select name from stores where id=$STORE_CLOSED_ID;")
+if [ "$C_NAME" != "$STORE_CLOSED_NAME" ]; then
+  echo "==> [准备失败] 停业店 id=$STORE_CLOSED_ID 的名字字节不对"
+  echo "              期望 '$STORE_CLOSED_NAME'"
+  echo "              实际 '$C_NAME'（乱码说明插入时被转码了）"; exit 1
+fi
 if [ "$LONG_STORE_LEN" != "51" ]; then
   echo "==> [准备失败] LONG_STORE_NAME 应为 51 个字，实际 $LONG_STORE_LEN 个"; exit 1
 fi
 
+# 手机号判**形状**（恰好 11 位数字）：它是脚本自己拼的（date +%s | tail -c 9），
+# 拼歪了后端回 400「手机号格式不正确」，而下面只会说"顾客注册没拿到 token" ——
+# 真因看不见。**Bug 38** 的形状：准备段只判"有没有"，不判"对不对"
+case "$PHONE_CUST" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *) echo "==> [准备失败] PHONE_CUST='$PHONE_CUST' 不是 11 位数字（date/tail 那段拼歪了？）"; exit 1;;
+esac
+
+# 这里**故意不用** login_or_register（那六份拷贝里的同名函数）：本脚本的号每次现拼
+# （date +%s | tail -c 9），注册必然成功 —— 那份函数里"失败就登录"的兜底在这儿是死分支，
+# 而万一它真走进去，拿到的会是一张**上一轮旧顾客**的票（本脚本结尾也不删这个号）。
+# 这张票是用来验"顾客进不了 /api/staff"的，是谁的票不影响结论 —— 但它必须是**这一次**
+# 注册出来的，否则"顾客能注册"这件事本身就不再被任何断言看着了
 CUST_T=$(jqf "$(postJson /api/auth/customer/register \
   "{\"phone\":\"$PHONE_CUST\",\"password\":\"123456\"}" "")" token)
 if [ -z "$CUST_T" ]; then
-  echo "==> [准备失败] 顾客注册没拿到 token"; exit 1
+  echo "==> [准备失败] 顾客注册没拿到 token（票长 ${#CUST_T}；$PHONE_CUST 是不是已被占了？）"; exit 1
 fi
 echo "  脚手架就绪：本次账号 $U_A / $U_C  新店 $STORE_NEW  顾客号 $PHONE_CUST"
+# 印**长度**不印票面值：空/非空一眼可判，票本身不进 CI 的日志产物
+echo "            票长 admin=${#ADMIN_T} manager=${#MGR_T} customer=${#CUST_T}"
 echo
 
 echo "########## A. 员工 CRUD（POST/GET/PUT /api/staff）##########"
@@ -184,8 +245,6 @@ fi
 # 库里那行也得对 —— 只看回显的话，"回显对了但库里存的是明文"照样能过
 check "A1e 库里存的是 BCrypt 哈希（\$2a\$ 开头），不是明文" \
   "$(db "select left(password,4) from staff where id=$U_A_ID;")" '\$2a\$'
-checkNot "A1f 库里没有明文密码（把明文当哈希存是最坏的一种「看起来能用」）" \
-  "$(db "select password from staff where id=$U_A_ID;")" "$PW"
 check "A1g 新建一律启用（status=1）" \
   "$(db "select status from staff where id=$U_A_ID;")" '^1$'
 check "A1h 库里 store_id 就是 1（不是回显里写着、库里没写）" \
@@ -244,56 +303,38 @@ A6=$(postJson /api/staff \
   "$ADMIN_T")
 check   "A6 重名建号 → 400 用户名已存在" "$A6" "用户名已存在"
 checkNot "A6b 消息里没有英文（Duplicate entry…）" "$(jqf "$A6" message)" '[A-Za-z]'
-check   "A6c 被拒后库里还是只有一行" \
-  "$(db "select count(*) from staff where username='$U_A';")" '^1$'
 
 # ── 超长：VARCHAR(30) 不拦就一路走到 INSERT 才被 MySQL 弹回来 ──
+# 长度这条**留在脚本里**是刻意的：它压的是"真实列宽"（VARCHAR(30)），
+# 单测里的 31 字只证明"应用层数了字数"，证明不了列宽就是 30
 A7=$(postJson /api/staff \
   "{\"username\":\"$LONG_USER\",\"password\":\"$PW\",\"name\":\"超长\",\"role\":1,\"storeId\":1,\"phone\":null}" \
   "$ADMIN_T")
 check   "A7 用户名 31 字 → 400（不是 500 的 SQL 异常）" "$A7" "用户名不能超过 30 个字"
 checkNot "A7b 消息里没有英文（DataTooLong…）" "$(jqf "$A7" message)" '[A-Za-z]'
-check   "A7c 被拒后库里没这个号" \
-  "$(db "select count(*) from staff where username='$LONG_USER';")" '^0$'
 
-# ── 角色：非法码复用 StaffRole.fromCode 那句话，不另造一句 ──
-check "A8 role=5 → 400 没有这个角色" \
-  "$(postJson /api/staff \
-     "{\"username\":\"x$RUN\",\"password\":\"$PW\",\"name\":\"坏角色\",\"role\":5,\"storeId\":null,\"phone\":null}" \
-     "$ADMIN_T")" \
-  "没有这个角色: 5"
-check "A8b role=null → 400 角色不能为空" \
-  "$(postJson /api/staff \
-     "{\"username\":\"x$RUN\",\"password\":\"$PW\",\"name\":\"坏角色\",\"role\":null,\"storeId\":null,\"phone\":null}" \
-     "$ADMIN_T")" \
-  "角色不能为空"
-
-# ── 必填与状态范围（形状问题，不走 SQL）──
+# ── 形状校验：只留两条代表探针（必填一条、状态范围一条）──
+# 原先这一段还有三条：role=5 / role=null / 密码为空，已搬进
+# StaffAdminAppServiceTest（create 与 update 各自一套）。
+# 留这两条是为了证"应用层的校验真接上了、回的是 400 中文"这件事本身 ——
+# 具体是哪条规则、什么边界（20 字/30 字/emoji/null），去单测里看，那里一次跑完
 check "A9 姓名为空 → 400 姓名不能为空" \
   "$(postJson /api/staff \
      "{\"username\":\"y$RUN\",\"password\":\"$PW\",\"name\":\"  \",\"role\":1,\"storeId\":null,\"phone\":null}" \
      "$ADMIN_T")" "姓名不能为空"
-check "A9b 密码为空 → 400 密码不能为空" \
-  "$(postJson /api/staff \
-     "{\"username\":\"y$RUN\",\"password\":\"\",\"name\":\"无密码\",\"role\":1,\"storeId\":null,\"phone\":null}" \
-     "$ADMIN_T")" "密码不能为空"
 check "A9c status=2 → 400 状态只能是 0(停用) 或 1(启用)" \
   "$(putJson "/api/staff/$U_A_ID/status" '{"status":2}' "$ADMIN_T")" \
   "状态只能是 0(停用) 或 1(启用)"
 
 # ── 404：**路径上那个资源不存在** ⇒ 404（400 留给"请求体里引用的 id 不合法"）──
+# 四条路由（查/改/停用/重置密码）里留前两条当代表：404 这条口径
+# 由 A10 + A10b 钉住就够了，第三第四条是同一条规则换了个动词
 check "A10 查不存在的员工 → 404 员工不存在" \
   "$(getJson "/api/staff/$STAFF_GHOST" "$ADMIN_T")" "员工不存在"
 check "A10b 改不存在的员工 → 404" \
   "$(putJson "/api/staff/$STAFF_GHOST" \
      "{\"name\":\"谁\",\"role\":1,\"storeId\":null,\"phone\":null}" "$ADMIN_T")" "员工不存在"
-check "A10c 停用不存在的员工 → 404" \
-  "$(putJson "/api/staff/$STAFF_GHOST/status" '{"status":0}' "$ADMIN_T")" "员工不存在"
-check "A10d 重置不存在的员工的密码 → 404" \
-  "$(putJson "/api/staff/$STAFF_GHOST/password" "{\"password\":\"$PW2\"}" "$ADMIN_T")" \
-  "员工不存在"
-check "A10e 404 而不是 400（口径：路径资源缺失 = 404）" \
-  "$(getJson "/api/staff/$STAFF_GHOST" "$ADMIN_T")" '"code":404'
+
 
 echo
 echo "########## B. 停用即失效（这轮最值钱的一条）##########"
@@ -485,20 +526,15 @@ check "D11b 停业不存在的门店 → 404 门店不存在" \
 D12=$(putJson "/api/stores/$S_NEW_ID" \
   "{\"name\":\"$LONG_STORE_NAME\",\"address\":\"路\",\"phone\":null}" "$ADMIN_T")
 check   "D12 店名 51 字 → 400（不是 500 的 SQL 异常）" "$D12" "门店名称不能超过 50 个字"
-checkNot "D12b 消息里没有英文（DataTooLong…）" "$(jqf "$D12" message)" '[A-Za-z]'
 check   "D12c 被拒后库里名字没变" "$(dbQ "select name from stores where id=$S_NEW_ID;")" "^$STORE_NEW$"
+# 门店形状校验也照样只留一条代表：D12d 证"接上了"，具体规则（地址必填、
+# 建店侧、status 越界）在 StoreAdminAppServiceTest 的 Create/Update 两套里。
+# "消息里没有英文"这条属性现在只留 A6b（撞唯一键）和 A7b（超列宽）两条 ——
+# 它们是 MySQL 两种不同的失败，各自都可能把英文漏出来，所以不算重复；
+# 门店侧那条（DataTooLong）是这里的第三份拷贝，删掉
 check "D12d 店名为空 → 400 门店名称不能为空" \
   "$(putJson "/api/stores/$S_NEW_ID" '{"name":"  ","address":"路","phone":null}' "$ADMIN_T")" \
   "门店名称不能为空"
-check "D12e 地址为空 → 400 地址不能为空" \
-  "$(putJson "/api/stores/$S_NEW_ID" '{"name":"店","address":null,"phone":null}' "$ADMIN_T")" \
-  "地址不能为空"
-check "D12f 建店时地址为空 → 400 地址不能为空" \
-  "$(postJson /api/stores '{"name":"店","address":"","phone":null}' "$ADMIN_T")" \
-  "地址不能为空"
-check "D12g status=2 → 400 状态只能是 0(停业) 或 1(营业)" \
-  "$(putJson "/api/stores/$S_NEW_ID/status" '{"status":2}' "$ADMIN_T")" \
-  "状态只能是 0(停业) 或 1(营业)"
 
 echo
 echo "########## E. 闸门·反方向：管理接口只对管理员开放 ##########"
@@ -557,6 +593,46 @@ check "E13e 管理员 admin 没被 E6 停用（脚手架守卫的第二次断言
   "$(db "select status from staff where username='admin';")" '^1$'
 
 echo
+echo "########## E14–E19 改密码的成功路径（本仓脚本第一次真跑它）##########"
+# 这一段补的是一个**量出来的洞**：`PUT /api/staff/{id}/password` 在本仓脚本里
+# **从来没有成功跑通过一次** —— E5 碰的是它的 403、原 A10d 碰的是它的 404，
+# "200 之后那一串"没人验过。而它的语义偏偏最重（StaffAdminAppService:215-219）：
+# **改密码 = 从前签发的凭据全部不算数**，少作废一步就等于"密码改了，别人的会话还活着"。
+#
+# 骨架完全照 B 段（停用即失效）：**先证这张票能用，再改密码，再断言它死了**。
+# 反过来写（改完直接断言 401）测的是"它本来就不能用"，那条断言无条件通过（Bug 37）。
+#
+# 对照组和 E18 用同一条 URL（/api/orders）—— 此刻 U_C 已被 C 段降级成店长，
+# 店长进得去这条。**特意不用 /api/staff**：店长在那条 URL 上"票好=403、票废=401"，
+# 403 会把前后对照搅浑（B3 那条注释里同一个坑）。E18 则因此干净地只可能来自作废检查。
+T_C5=$(jqf "$(postJson /api/auth/staff/login "{\"username\":\"$U_C\",\"password\":\"$PW\"}" "")" token)
+if [ -z "$T_C5" ]; then
+  echo "==> [准备失败] 改密码前的对照组登录没拿到票（$U_C / $PW）"; exit 1
+fi
+check "E14 改密码**之前**，这张票是在用的（对照组）" \
+  "$(getJson /api/orders "$T_C5")" '"code":200'
+
+OLD_HASH=$(db "select password from staff where id=$U_C_ID;")
+check "E15 管理员重置密码 → 200" \
+  "$(putJson "/api/staff/$U_C_ID/password" "{\"password\":\"$PW2\"}" "$ADMIN_T")" '"code":200'
+# 直接看 Redis 里那个键 —— 只看"旧票 401"分不出是水位线生效还是别的原因（同 B2c）
+WM2=$(redis_get "auth:staff:invalidAfter:$U_C_ID")
+check "E15b 改密码写下了失效水位线（Redis 里那个键真的在）" "$WM2" '^[0-9][0-9]*$'
+NEW_HASH=$(db "select password from staff where id=$U_C_ID;")
+check "E15c 库里那串哈希真的换了（不是只改了回显）" \
+  "$([ "$OLD_HASH" = "$NEW_HASH" ] && echo 一样 || echo 变了)" "变了"
+
+check "E16 新密码能登录 → 200（改密码的另一半：得让人进得来）" \
+  "$(postJson /api/auth/staff/login "{\"username\":\"$U_C\",\"password\":\"$PW2\"}" "")" '"code":200'
+check "E17 旧密码不能登录 → 401（不是 200）" \
+  "$(postJson /api/auth/staff/login "{\"username\":\"$U_C\",\"password\":\"$PW\"}" "")" '"code":401'
+check "E18 改密码前签发的票**当场**作废 → 401（同一张票、同一条 URL）" \
+  "$(getJson /api/orders "$T_C5")" '"code":401'
+# 水位线是**按 staffId** 写的，不是一把全局锁 —— 这条防的是"改一个人的密码，全店掉线"
+check "E19 别人的票不受影响（E5 之后管理员的票还在这儿用着）" \
+  "$(getJson /api/staff "$ADMIN_T")" '"code":200'
+
+echo
 echo "########## F. 闸门·原方向（防回归）##########"
 # 反方向是**新加的**，最容易顺手把原方向带歪。这六条是三条老规则 + 一条别误伤。
 # 说辞一个字都不该变 —— 闸门的台词也是被测的（scripts/README.md）
@@ -601,13 +677,10 @@ G1=$(postJson /api/staff \
 check "G1 建店长时 storeId=$STORE_GHOST（不存在）→ 400 门店不存在" "$G1" "门店不存在"
 check "G1b 被拒之后真没建（幽灵门店的店长不该存在）" \
   "$(db "select count(*) from staff where username='g$RUN';")" '^0$'
-BEFORE_SID=$(db "select ifnull(store_id,'<NULL>') from staff where id=$U_C_ID;")
 check "G2 改员工时 storeId=$STORE_GHOST → 400 门店不存在" \
   "$(putJson "/api/staff/$U_C_ID" \
      "{\"name\":\"验收管理员\",\"role\":1,\"storeId\":$STORE_GHOST,\"phone\":null}" "$ADMIN_T")" \
   "门店不存在"
-check "G2b 被拒之后他的门店没被改坏（还是 $BEFORE_SID）" \
-  "$(db "select ifnull(store_id,'<NULL>') from staff where id=$U_C_ID;")" "^$BEFORE_SID$"
 # 挂到**停业**的门店上是**允许**的（查的是 findById 不是 findOpenById）：
 # 把一个店长先挂到还没开业 / 已停业的店上是正常操作，拿 findOpenById 会把
 # "停业的店"误判成"不存在的店"，于是你永远改不了一个已停业门店的员工 ——

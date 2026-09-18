@@ -21,6 +21,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 覆盖：
  *   1. 四条合法全路径（门店单先付 / 网单先付 / 两种洗后付）
  *   2. 非法流转（未支付推进、终态推进、未付清走终态、重复支付）
+ *   3. 支付金额校验、优惠券抵扣（含上界恰好 1.0）、快递单号录入（含 emoji 边界）
+ *   4. 明细列表是只读视图（getItems）
+ *   5. **两条曾经是缺口、2026-09-18 已修**：空明细与 source=null ——
+ *      见文件末尾那段，原先钉的是缺口本身，现在钉的是补上的那两道闸
  *
  * 2026-09-11 口径：码值连号 1~7，7 是通用终态，
  * 门店单 1→2→3→4→5→7、网单 1→2→3→4→6→7，两条路**都**要付清才能到 7。
@@ -413,6 +417,24 @@ class OrderTest {
         }
 
         @Test
+        @DisplayName("折扣率恰好 1.0 → 放行，但抵扣为 0（上界是「不超过 1」）")
+        void exactlyOneIsAllowed() {
+            // 边界两侧不对称：1.01 被拒（见上一条），1.0 放行。
+            // 放行的后果是"0 折券"—— 金额一分不变、discount_amount 记 0.00，
+            // 用户拿着券却什么也没省。这不是 bug，是"100% 折扣率"本身没意义；
+            // 必须单独钉住它，是因为把判据改成"大于等于 1 就拒"
+            // （compareTo(BigDecimal.ONE) >= 0）会让每次用券都变成不打折，
+            // 而现有测试**全绿** —— 1.01 照样被拒。少的就是这一条
+            Order order = newOrder(OrderSource.STORE);
+
+            order.applyCoupon(9L, BigDecimal.ONE);
+
+            assertThat(order.getTotalAmount()).isEqualByComparingTo(TOTAL);
+            assertThat(order.getDiscountAmount()).isEqualByComparingTo("0.00");
+            assertThat(order.getCouponId()).isEqualTo(9L);
+        }
+
+        @Test
         @DisplayName("重复用券 → 报错（一张订单只挂一张券，再折一次就是静默少收钱）")
         void secondCouponRejected() {
             Order order = newOrder(OrderSource.STORE);
@@ -540,6 +562,122 @@ class OrderTest {
                     .hasMessageContaining("不能超过");
             // 被拒之后还是上一次那个 50 字符的号，没被改脏
             assertThat(order.getExpressNo()).hasSize(50);
+        }
+
+        @Test
+        @DisplayName("emoji 按 1 个字算：50 个放行、51 个才拦（不是按 length() 数）")
+        void emojiCountedAsOneChar() {
+            // 上面那条用的是 "X".repeat(50) —— 对 ASCII 来说 length() 和码点数一样，
+            // 所以它证明不了判据用的是哪一个。这一条用 50 个 emoji（length() = 100）：
+            // 判据要是写成 length()，"50 个表情的快递单号"会被误判成超长 ——
+            // 不是数据损坏，是"明明存得下却不让填"，一样是 bug
+            Order order = onlineAtDelivering();
+            assertThat("📦".repeat(50).length()).isEqualTo(100);   // 先证明这个前提成立
+
+            order.fillExpressNo("📦".repeat(50));
+            assertThat(order.getExpressNo()).isEqualTo("📦".repeat(50));
+
+            assertThatThrownBy(() -> order.fillExpressNo("📦".repeat(51)))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("不能超过");
+            // 被拒之后还是上一次那个 50 个 emoji 的号，没被改脏
+            assertThat(order.getExpressNo()).isEqualTo("📦".repeat(50));
+        }
+    }
+
+    // ════════════════ 只读视图 ════════════════
+
+    @Nested
+    @DisplayName("明细列表是只读视图")
+    class ItemsReadOnly {
+
+        @Test
+        @DisplayName("getItems() 拿到手也改不了订单的明细（交出去的不是内部那个 list）")
+        void unmodifiable() {
+            // 直接交出内部 list 的后果很具体：任何人拿到就能往订单里塞一条
+            // 没算过价的明细，而 totalAmount 是构造时一次算好的 ——
+            // 金额和明细当场对不上，而且没有任何东西会发觉
+            Order order = newOrder(OrderSource.STORE);
+            List<OrderItem> items = order.getItems();
+            OrderItem extra = new OrderItem(11L, 1L, 1, new BigDecimal("1.00"), null);
+
+            assertThatThrownBy(() -> items.add(extra))
+                    .isInstanceOf(UnsupportedOperationException.class);
+            assertThat(order.getItems()).hasSize(1);
+        }
+    }
+
+    // ════════════════ 两个曾经的缺口 —— 2026-09-18 已修，这里钉的是补上的闸 ════════════════
+    //
+    // 这两个 Nested 原先叫"钉住现状"：当时刻意不写会红的测试，只把缺口本身钉死，
+    // 并在 docs/bug-record.md 记了账。2026-09-18 深夜用户拍板修，于是它们翻了个面 ——
+    // 现在钉的是**域层的第二道闸**。留在此处的理由和当初一样：
+    // 谁把闸拆了，先在这里红，而不是等库里出现了 0 元订单才发现。
+
+    @Nested
+    @DisplayName("空明细：构造当场拒（域层第二道闸）")
+    class EmptyItemsRejected {
+
+        @Test
+        @DisplayName("空明细 → 构造就抛「订单至少要有一条明细」，一步都走不出去")
+        void emptyItemsRejected() {
+            // 修之前的路，四个环节分开看都"没错"：
+            //   · 构造器：空明细求和 = reduce 的单位元 0，总额 0
+            //   · pay：0 既"等于 totalAmount"也"等于洗后付的 0"，两个条件都放行
+            //   · requirePaidOff：问的是"付得够不够"，0 < 0 为假 —— 它没问"付的是不是 0"
+            //   · finish：终态不看金额
+            // 当初唯一挡着它的是 OrderController:50-52。现在挡在域里 ——
+            // 定时任务 / 后台脚本 / 第二个前端这些入口同样绕不掉
+            assertThatThrownBy(() ->
+                    new Order("YX-EMPTY-0001", 1L, 1L, OrderSource.ONLINE, List.of()))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessage("订单至少要有一条明细");
+        }
+
+        @Test
+        @DisplayName("items=null 也是同一句话拒掉（不是 NPE、不是 500）")
+        void nullItemsRejected() {
+            // 判据写的是 `items == null || items.isEmpty()`，两者共用一句话。
+            // 拆成两处写，迟早会变成"一个是 400、一个是 500"
+            assertThatThrownBy(() ->
+                    new Order("YX-EMPTY-0002", 1L, 1L, OrderSource.STORE, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessage("订单至少要有一条明细");
+        }
+
+        @Test
+        @DisplayName("对照：有一条明细就正常建出来（别把闸做成「永远拒」）")
+        void oneItemStillWorks() {
+            assertThat(newOrder(OrderSource.STORE).getTotalAmount())
+                    .isEqualByComparingTo(TOTAL);
+        }
+    }
+
+    @Nested
+    @DisplayName("source=null：4 态分叉时抛，不再静默走网单")
+    class NullSourceRejected {
+
+        @Test
+        @DisplayName("source=null → 推到 4 之后那一步抛「订单缺少来源」，状态停在 4")
+        void nullSourceThrowsAtFork() {
+            // 修之前：判据是 `if (== STORE) … else …`，null 落进 else，
+            // 一张来源不明的订单被静默当成网单 —— 之后会被要求录快递单号、
+            // 状态文案也是网单那套，而且**不报错、不留痕**。
+            // 现在分叉点先问一句"来源呢"，再决定走哪支。
+            //
+            // 前面 2→3、3→4 两步**照常推进**：闸只设在分叉点，不在更早的地方 ——
+            // 否则一张 source 还没填上的在途订单会在无关的状态上炸，报错位置指不到真因
+            Order order = newOrder(null);
+            order.pay(PayMethod.CASH, TOTAL);
+            order.updateStatus();   // 2 → 3
+            order.updateStatus();   // 3 → 4
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.PENDING_DELIVERY);
+
+            assertThatThrownBy(order::updateStatus)
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessage("订单缺少来源，无法判断后续流程");
+            // 抛完之后**什么都没被改**：状态还是 4，没被顺手写成 5 也没写成 6
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.PENDING_DELIVERY);
         }
     }
 }

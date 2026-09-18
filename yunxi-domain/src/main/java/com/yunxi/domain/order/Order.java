@@ -41,9 +41,22 @@ public class Order {
 
     /** 无参构造 — MyBatis 用 */
     public Order() {}
-    /** 创建新订单 */
+    /**
+     * 创建新订单。
+     *
+     * **空明细当场拒**（2026-09-18 补的第二道闸）：明细为空时求和得到 reduce 的
+     * 单位元 0，于是 totalAmount=0 → `pay(0)` 同时满足"等于全额"和"洗后付的 0"
+     * 两个条件 → `requirePaidOff` 问的是"付得够不够"，0 &lt; 0 为假 → 一路推到终态 7，
+     * 一分钱没收。原先唯一的闸在 `OrderController:50-52`，换定时任务 / 后台脚本 /
+     * 第二个前端就绕过去了 —— 与 `fillExpressNo` 的长度校验同一个理由：
+     * **订单自己的不变量，换任何入口进来都绕不掉**。
+     */
     public Order(String orderNo, Long storeId, Long customerId,
                  OrderSource source, List<OrderItem> items) {
+        if (items == null || items.isEmpty()) {
+            // 与 OrderController 那句用词一致：同一个错误不该有两种说法
+            throw new BusinessException("订单至少要有一条明细");
+        }
         this.orderNo = orderNo;
         this.storeId = storeId;
         this.customerId = customerId;
@@ -187,6 +200,14 @@ public class Order {
                 this.status = OrderStatus.PENDING_DELIVERY;
                 break;
             case PENDING_DELIVERY:   // 4 → 分叉：门店走5，网单走6
+                // source 为 null 必须**抛**（2026-09-18 补）：这是全流程**唯一**
+                // 按来源分叉的状态点，而判据原本写成 `if (== STORE) … else …`，
+                // null 落进 else —— 等于"来源不明的订单静默当成网单"：之后会被要求
+                // 录快递单号、状态文案也是网单那套，**不报错、不留痕**。
+                // 安静地走错一支比抛异常难查得多（到录单号那步才会反着报出来）
+                if (this.source == null) {
+                    throw new BusinessException("订单缺少来源，无法判断后续流程");
+                }
                 if (this.source == OrderSource.STORE) {
                     this.status = OrderStatus.PENDING_PICKUP;
                 } else {

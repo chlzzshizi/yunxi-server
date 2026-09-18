@@ -26,7 +26,48 @@ db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N \
 
 MGR_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H 'Content-Type: application/json' \
   -d '{"username":"manager","password":"admin123"}')" token)
-CID=$(db "select id from customers order by id limit 1;")
+
+# 顾客注册 → 已注册则登录，返回 token。
+# 姓名用 ASCII：Git Bash 会把 shell 里的中文按 GBK 发出去，后端按 UTF-8 解析会 400
+# （这是脚本的锅不是后端的；中文经文件投递的用例见 verify-stores.sh 的 C1）
+# 函数体在本仓库有**六份拷贝**（彼此逐字一致）：verify-orders.sh /
+# verify-coupons.sh / verify-price.sh / verify-price-write.sh /
+# verify-pricing-authority.sh / verify-race.sh —— 就是下面这一个函数。
+# 脚本之间不互相 source：六份拷贝是故意的，要的就是"单跑任何一个都成立"。
+# md5（从 `login_or_register() {` 到收尾的 `}`）= 5d383e42ede9
+# （复核命令见 scripts/README.md 的"六份拷贝"一节；改任何一份都要同步改六份）
+login_or_register() {
+  local name=$1 phone=$2 resp token
+  resp=$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
+    -d "{\"name\":\"$name\",\"phone\":\"$phone\",\"password\":\"123456\"}")
+  token=$(jqf "$resp" token)
+  if [ -z "$token" ]; then
+    resp=$(curl -s -X POST $BASE/api/auth/customer/login -H "Content-Type: application/json" \
+      -d "{\"phone\":\"$phone\",\"password\":\"123456\"}")
+    token=$(jqf "$resp" token)
+  fi
+  echo "$token"
+}
+
+# 顾客脚手架：**自己建**（**Bug 41** 的修法）。
+# 原写法是 `select id from customers order by id limit 1` —— 随手取库里 id 最小的那行，
+# 而本脚本**一句建档语句都没有**。于是：
+#   · 九连跑能过，纯粹因为它排第 8 位，前面七个脚本已经建过顾客了
+#   · 单跑在空库上必塌（好在是下面那条守卫的**诚实**失败，不是假绿）
+# 这和 Bug 38 / Bug 39 是**同一个形状**：把"执行顺序"当成了"本脚本的前提"。
+# 顺带把"借一个别人的顾客"换成"用自己的" —— 订单挂在谁名下不再取决于谁先跑过。
+# 号段 13900000021 归本脚本（91=定价三兄弟、01/02=orders、11/12=coupons）
+CUST_T=$(login_or_register RaceCust 13900000021)
+CID=$(db "select id from customers where phone='13900000021';")
+# id 判**形状**不判有无：MySQL 一挂，db() 这个吞 stderr 的写法会返回空串，
+# 而空串照样能拼出 {"customerId":,} 这种畸形 JSON（Bug 38/39 的教训）
+case "$CID" in
+  ''|*[!0-9]*)
+    echo "==> [准备失败] 顾客脚手架没就绪：票长 ${#CUST_T}、id='$CID'"
+    echo "             后端在 8081 吗？13900000021 能不能注册/登录？"; exit 1;;
+esac
+
+PASS=0; FAIL=0
 
 # 建单 → 支付 → 推进到 3（洗后付拦不到，先付全额）
 #
@@ -66,13 +107,33 @@ echo
 echo "请求1: $R1"
 echo "请求2: $R2"
 echo
-echo "最终状态=$(db "select status from orders where id=$OID;")  （期望 4=待出厂，**只推进一格**）"
+# "只推进一格"**必须是一条断言，不能是打印**。原写法把它写在括号里就完了，
+# 意思是：万一两个请求都成功（丢更新没被挡住），只要下面那条碰巧过，
+# "状态被推进了两格"这件事**没有任何东西在守**。
+# 和 Bug 38 是同一个形状：**把结论印出来，当成验过了**。
+STATUS_AFTER=$(db "select status from orders where id=$OID;")
+if [ "$STATUS_AFTER" = "4" ]; then
+  echo "  [OK]   最终状态=4（待出厂）—— 只推进了一格"; PASS=$((PASS+1))
+else
+  echo "  [FAIL] 最终状态=$STATUS_AFTER，期望 4（待出厂）"
+  echo "         推进两格 = 两个 next 都生效了，丢更新没被挡住"; FAIL=$((FAIL+1))
+fi
 
 OK=0; CONFLICT=0
 echo "$R1$R2" | grep -q '"code":200' && OK=1
 echo "$R1$R2" | grep -q '"code":409' && CONFLICT=1
 if [ $OK -eq 1 ] && [ $CONFLICT -eq 1 ]; then
-  echo "==> [OK] 一个成功、一个 409 —— 丢更新被挡住了"
+  echo "  [OK]   恰好一个 200、一个 409 —— CAS 挡住了第二次写"; PASS=$((PASS+1))
 else
-  echo "==> [FAIL] 期望恰好 1 个 200 + 1 个 409"
+  echo "  [FAIL] 期望恰好 1 个 200 + 1 个 409"; FAIL=$((FAIL+1))
 fi
+
+echo
+echo "================================"
+echo "  通过 $PASS 项，失败 $FAIL 项"
+echo "================================"
+
+# 退出码就是断言结果（**Bug 40** 的修法）。原写法连 FAIL 变量都没有 ——
+# 并发那条断言红了也只印一行 [FAIL]，脚本照样退 0，CI 打 OK。
+# 这一步原本被注释成"不报性能数字"，但它报的是**正确性**断言，该失败就得失败。
+[ $FAIL -eq 0 ]

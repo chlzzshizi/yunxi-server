@@ -151,6 +151,12 @@ class CustomerAuthAppServiceTest {
             assertThat(customerAuthAppService.register("13800138000", null))
                     .extracting(Result::code, Result::message)
                     .containsExactly(400, "手机号和密码不能为空");
+            // 空白串（不是 null）那半边：前端把输入框的 "   " 原样提交是最常见的坏输入，
+            // 它不会被 BCrypt 抛异常挡下（会老老实实算一个哈希出来），
+            // 于是"手机号对了、密码是一串空格"的账号就真的建出来了
+            assertThat(customerAuthAppService.register("13800138000", "   "))
+                    .extracting(Result::code, Result::message)
+                    .containsExactly(400, "手机号和密码不能为空");
             verify(customerRepository, never()).save(any());
         }
     }

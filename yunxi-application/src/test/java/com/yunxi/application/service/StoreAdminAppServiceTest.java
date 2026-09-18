@@ -225,4 +225,76 @@ class StoreAdminAppServiceTest {
             assertThat(service.updateStatus(9L, 0).code()).isEqualTo(404);
         }
     }
+
+    // ═══════════════════ 改门店的字段校验 ═══════════════════
+    //
+    // validate(cmd) 在 createStore 和 updateStore 里调的是**同一个方法**
+    // （StaffAdmin 那两处是复制的，这里是共用的），但**调用点仍是两处**：
+    // 建店那一侧把必填与三条长度测全了，改店这一侧一条都没有。
+    // 所以这一组补的不是 validate 本身（上面 Create 那组已经覆盖了它的内部），
+    // 而是"这个调用点确实接上了"—— 少了它，有人把 updateStore 里那两行
+    // validate(cmd) 删掉，全部测试照样绿，而脏数据能从编辑页进库。
+
+    @Nested
+    @DisplayName("改门店的字段校验（validate 在改的这一侧也接上了）")
+    class UpdateValidation {
+
+        /** 3 号门店已在库里 —— updateStore 是**先 findById 再 validate**，顺序不能颠倒 */
+        private void existing() {
+            when(storeRepository.findById(3L))
+                    .thenReturn(Optional.of(store(3L, "老名字", 1)));
+        }
+
+        @Test
+        @DisplayName("名称空白 → 400 门店名称不能为空，且一个字段都没写进去")
+        void blankNameRejected() {
+            existing();
+
+            for (String bad : new String[]{null, "", "   "}) {
+                Result<StoreAdminView> r = service.updateStore(3L, cmd(bad, "路 1 号", null));
+                assertThat(r.code()).isEqualTo(400);
+                assertThat(r.message()).isEqualTo("门店名称不能为空");
+            }
+            verify(storeRepository, never()).update(any());
+        }
+
+        @Test
+        @DisplayName("地址空白 → 400 地址不能为空")
+        void blankAddressRejected() {
+            existing();
+
+            Result<StoreAdminView> r = service.updateStore(3L, cmd("新名字", "   ", null));
+
+            assertThat(r.code()).isEqualTo(400);
+            assertThat(r.message()).isEqualTo("地址不能为空");
+            verify(storeRepository, never()).update(any());
+        }
+
+        @Test
+        @DisplayName("三条长度上限在改的路径上也拦（超长抛，不是撞 VARCHAR 变 500）")
+        void lengthLimits() {
+            existing();
+
+            assertThatThrownBy(() -> service.updateStore(3L, cmd("店".repeat(51), "路", null)))
+                    .hasMessage("门店名称不能超过 50 个字");
+            assertThatThrownBy(() -> service.updateStore(3L, cmd("店", "路".repeat(201), null)))
+                    .hasMessage("地址不能超过 200 个字");
+            assertThatThrownBy(() -> service.updateStore(3L, cmd("店", "路", "1".repeat(21))))
+                    .hasMessage("电话不能超过 20 个字");
+            verify(storeRepository, never()).update(any());
+        }
+
+        @Test
+        @DisplayName("电话传空白串 → 存 null（把电话清空是合法操作，不是把字段删掉）")
+        void blankPhoneBecomesNull() {
+            existing();
+
+            Result<StoreAdminView> r = service.updateStore(3L, cmd("新名字", "路 1 号", "   "));
+
+            assertThat(r.code()).isEqualTo(200);
+            var captor = org.mockito.ArgumentCaptor.forClass(Store.class);
+            verify(storeRepository).update(captor.capture());
+            assertThat(captor.getValue().getPhone()).isNull();
+        }
+    }
 }

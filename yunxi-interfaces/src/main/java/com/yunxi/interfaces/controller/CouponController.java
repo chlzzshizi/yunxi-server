@@ -23,9 +23,25 @@ public class CouponController {
         this.couponAppService = couponAppService;
     }
 
-    /** 店长发券 */
+    /**
+     * 店长发券。
+     *
+     * **身份闸是 2026-09-18 补的（Bug 42）**：原先这里没有任何身份判断 ——
+     * `JwtInterceptor.checkRoleGate` 遇到非 staff 直接 `return`（"顾客能用哪些接口
+     * 由各 Controller 自己判断"，而本方法忘了判断），于是**任何一张有效票**都能建券：
+     * 顾客给自己发一张 0.01 的券 → 定时任务 60 秒内把它推成"进行中" → 抢下来下单抵扣。
+     * 影响是**直接的钱**，不是脏数据。
+     *
+     * 判据与下面两个方法同形（只是方向相反），文案与其余五个 controller 的员工闸一致。
+     * 规则留给"店长发券"这句话旁边的代价是：以后新写接口仍要记得加一句 ——
+     * 更稳的做法是把"发券只归员工"上移到 `checkRoleGate` 按前缀收口（见 bug-record 的候选修法 B）。
+     */
     @PostMapping
-    public Result<CouponPO> createCoupon(@RequestBody CreateCouponRequest request) {
+    public Result<CouponPO> createCoupon(@RequestBody CreateCouponRequest request,
+                                         HttpServletRequest http) {
+        if (!"staff".equals(http.getAttribute("type"))) {
+            return Result.fail(401, "请使用员工账号操作");
+        }
         CouponPO coupon = new CouponPO();
         coupon.setName(request.name());
         coupon.setDiscount(request.discount());

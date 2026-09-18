@@ -189,21 +189,42 @@ if [ "$LONG_NAME_LEN" != "21" ]; then
   echo "==> [准备失败] LONG_NAME 应为 21 个字，实际 $LONG_NAME_LEN 个（'$LONG_NAME'）"; exit 1
 fi
 
+# 三个手机号都是脚本自己拼的（前缀 + date +%s | tail -c 9）—— 判**形状**：
+# 恰好 11 位数字。拼歪了（tail 的用法变了、date 输出变了）后端回的是
+# 400「手机号格式不正确」，而下游只会报"注册没 200"、"拿不到 id" ——
+# 真因是脚手架拼错了，不是被测的那条规则坏了。**Bug 38** 的形状：
+# 准备段只判"有没有"，不判"对不对"
+for p in "$PHONE_NEW" "$PHONE_NONAME" "$PHONE_CUST"; do
+  case "$p" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) echo "==> [准备失败] 手机号 '$p' 不是 11 位数字（date/tail 那段拼歪了？）"; exit 1;;
+  esac
+done
+
 ADMIN_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin123"}')" token)
 MGR_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
   -d '{"username":"manager","password":"admin123"}')" token)
 if [ -z "$MGR_T" ] || [ -z "$ADMIN_T" ]; then
-  echo "==> [准备失败] 登录没拿到 token（后端没起？）"; exit 1
+  echo "==> [准备失败] 登录没拿到 token（后端没起？还是账号被上一轮脚本停用了？）"
+  echo "             票长 admin=${#ADMIN_T} manager=${#MGR_T}"
+  exit 1
 fi
 
-# 顾客 token：注册一个本次专用的号，收尾时删掉
+# 顾客 token：注册一个本次专用的号，收尾时删掉。
+# 这里**故意不用** login_or_register（那六份拷贝里的同名函数）：本脚本的号每次现拼
+# （date +%s | tail -c 9），注册必然成功 —— 那份函数里"失败就登录"的兜底在这儿是死分支。
+# 而万一它真走进去（号被上一轮的残渣占了），拿到的会是一张**旧顾客**的票，
+# D 段"名字从 NULL 变成补名测试"这类断言就变成对着旧状态说话。
+# 所以这里要的是"注册失败就当场停"，不是"想办法弄到一张票"。
 CUST_T=$(jqf "$(postJson /api/auth/customer/register \
   "{\"phone\":\"$PHONE_CUST\",\"password\":\"123456\"}" "")" token)
 if [ -z "$CUST_T" ]; then
-  echo "==> [准备失败] 顾客注册没拿到 token"; exit 1
+  echo "==> [准备失败] 顾客注册没拿到 token（票长 ${#CUST_T}；$PHONE_CUST 是不是已被占了？）"; exit 1
 fi
 echo "  脚手架就绪：停业店 id=$STORE_CLOSED_ID  新号 $PHONE_NEW  顾客号 $PHONE_CUST"
+# 印**长度**不印票面值：空/非空一眼可判，票本身不进 CI 的日志产物
+echo "            票长 admin=${#ADMIN_T} manager=${#MGR_T} customer=${#CUST_T}"
 echo
 
 echo "########## A. GET /api/stores ##########"
@@ -237,11 +258,13 @@ echo "########## B. POST /api/customers/lookup-or-create ##########"
 BODY="{\"phone\":\"$PHONE_NEW\",\"name\":\"建档测试甲\"}"
 B1=$(postJson /api/customers/lookup-or-create "$BODY" "$MGR_T")
 check "B1 新手机号 → 200 且 created=true" "$B1" '"created":true'
-CUST_ID=$(jqf "$B1" customerId)
 
 B2=$(postJson /api/customers/lookup-or-create "$BODY" "$MGR_T")
 check "B2 同手机号再来一次 → created=false（没有第二次建人）" "$B2" '"created":false'
-check "B2b 返回的还是同一个 customerId" "$(jqf "$B2" customerId)" "^$CUST_ID$"
+# 原先还有一条 B2b「返回的还是同一个 customerId」（拿 B1 回显的 id 比对）。
+# "同号永远同一个顾客"这条规则现在由三处守着：B2 的 created=false、B3b 的
+# 库里只有一行（那条更硬 —— 库里的行数才是事实），以及单测
+# CustomerAppServiceTest.returnsExisting。回显 id 那一条是第三份拷贝，删掉
 
 check "B3 库里这个号的 password 是 NULL（门店单顾客不上线登录）" \
   "$(db "select ifnull(password,'<NULL>') from customers where phone='$PHONE_NEW';")" '<NULL>'
@@ -251,7 +274,9 @@ check "B3b 库里只有一行（两次调用没建出两个人）" \
 # 出参里没有 password —— CustomerView 存在的首要理由。单测反射钉了字段名，
 # 这里钉真实的 JSON 字节：接口回给前端的东西里就是不该有这四个字母
 checkNot "B4 响应体里没有 password 字段" "$B1" 'password'
-checkNot "B4b 响应体里没有 password 字段（false 那次也是）" "$B2" 'password'
+# B4b（false 那次也验一遍）删了：同一个端点、同一个 CustomerView，
+# 字段集合由 CustomerAppServiceTest.viewHasNoPasswordField 反射钉着，
+# 而"真实 JSON 字节里没有这四个字母"这件事 D1c 在 /me 那个投影上还钉着一次
 
 # 老顾客改名：柜台顺手打个错别字不该悄悄改档案
 B5=$(postJson /api/customers/lookup-or-create \
@@ -318,8 +343,9 @@ B13=$(postJson /api/customers/lookup-or-create \
         "{\"phone\":\"$PHONE_NONAME\",\"name\":\"$LONG_NAME\"}" "$MGR_T")
 check   "B13 店员传 21 个字的姓名 → 400（不是 500 的 SQL 异常）" "$B13" "姓名不能超过 20 个字"
 checkNot "B13b 消息里没有英文（DataTooLong…）" "$(jqf "$B13" message)" '[A-Za-z]'
-check   "B13c 被拒之后库里没这个号（真没建）" \
-  "$(db "select count(*) from customers where phone='$PHONE_NONAME';")" '^0$'
+# B13c（被拒之后库里没这个号）删了：B6b 已经在为**同一个手机号**断言 count=0，
+# 而"长度校验失败一个字都不写"的单测家是 CustomerAppServiceTest.tooLongNameNotFilled；
+# 超长这条规则"没写进去"的探针由 D5c 在 /me 上留着一条
 
 echo
 echo "########## C. 建单的不可信输入（orders 没有外键，只能靠代码守）##########"
@@ -329,10 +355,14 @@ echo "########## C. 建单的不可信输入（orders 没有外键，只能靠�
 #   网单   storeId    来自请求体 → 回库确认     customerId 来自顾客 token → 不查
 #   门店单 customerId 来自请求体 → 回库确认     storeId    来自员工 token → 不查
 # 每条坏值都要配一条好值的对照，否则 400 可能是别的原因造成的（见 C1 的注释）
+# 判**形状**不是有无（**Bug 38** 的规矩）：db() 把 stderr 丢了，MySQL 一挂它返回空串，
+# 而空串拼进 payload 会成为 "customerId":, 这种畸形 JSON —— 400 的理由就变成
+# "请求体格式不正确"，C 段每条断言都指不到真因上
 CUST_ID_IN_DB=$(db "select id from customers where phone='$PHONE_CUST';")
-if [ -z "$CUST_ID_IN_DB" ]; then
-  echo "==> [准备失败] 拿不到顾客 $PHONE_CUST 的 id"; exit 1
-fi
+case "$CUST_ID_IN_DB" in
+  '')       echo "==> [准备失败] 顾客 $PHONE_CUST 查不到 id（MySQL 没起？后端没起？）"; exit 1;;
+  *[!0-9]*) echo "==> [准备失败] 顾客 $PHONE_CUST 的 id 不是数字：'$CUST_ID_IN_DB'"; exit 1;;
+esac
 
 # C1 特意带上**合法地址**：不带的话 400 会来自"网单没地址"那条规则（见 C3），
 # 断言还是绿的，但测到的就不是门店校验了 —— 断言过的理由必须也是被测的那个
@@ -407,11 +437,17 @@ check "D2c 库里真改了（不是只改了回显）" \
 # 这里必须断言两件事，缺一不可：
 #   D3c 被改的仍然是自己的名（越权失败）
 #   D3d 别人的档案一个字没动（否则"改成了自己的名字"可能只是句空话）
+# 两个 id 判**形状**（不是有无）：见 C 段那条同款注释 —— 空串拼出的
+# "customerId":, 会让 D3 的请求体整个 400，而 D3 想验的是"塞了 customerId 也不越权"。
+# 形状判据同时管住了"空"（`''` 是它的一支），所以这里不再另写一条 -z 检查
 OTHER_ID=$(db "select id from customers where phone='$PHONE_NEW';")
 MY_ID=$(db "select id from customers where phone='$PHONE_CUST';")
-if [ -z "$OTHER_ID" ] || [ -z "$MY_ID" ]; then
-  echo "==> [准备失败] 拿不到两个顾客的 id（OTHER_ID='$OTHER_ID' MY_ID='$MY_ID'）"; exit 1
-fi
+for v in OTHER_ID MY_ID; do
+  case "${!v}" in
+    '')          echo "==> [准备失败] 两个顾客的 id 有一个查不到：$v=''（MySQL 没起？）"; exit 1;;
+    *[!0-9]*)    echo "==> [准备失败] 顾客 id 不成形：$v='${!v}'"; exit 1;;
+  esac
+done
 D3=$(putJson /api/customers/me \
        "{\"name\":\"越权改名\",\"customerId\":$OTHER_ID}" "$CUST_T")
 check   "D3 塞 customerId 想改别人 → 仍 200（多传的键被忽略，不是报错）" "$D3" '"code":200'
@@ -427,7 +463,8 @@ check "D4 名字传空 → 400 姓名不能为空" \
 
 D5=$(putJson /api/customers/me "{\"name\":\"$LONG_NAME\"}" "$CUST_T")
 check   "D5 21 个字的姓名 → 400（不是 500 的 SQL 异常）" "$D5" "姓名不能超过 20 个字"
-checkNot "D5b 消息里没有英文（DataTooLong…）" "$(jqf "$D5" message)" '[A-Za-z]'
+# D5b（没有英文）删了：本脚本的这条属性由 B13b 代表（同一属性不需要两处），
+# 而属性本身归 GlobalExceptionHandlerTest 的五条通道
 check   "D5c 超长值没被写进去（名字还是上一轮那个）" \
   "$(db "select name from customers where phone='$PHONE_CUST';")" '越权改名'
 

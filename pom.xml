@@ -148,6 +148,36 @@
                     </annotationProcessorPaths>
                 </configuration>
             </plugin>
+
+            <!-- JaCoCo：只为**看见**覆盖率，不设门槛（不加 check goal）。
+                 设了门槛就会有人写空测试去凑数，而这一轮的目标是"洞在哪看得见" ——
+                 设计文档 §7 早就要求了领域层/应用层单测，这一年没人知道缺了多少，
+                 因为没有量具。
+                 版本必须自己写：我核过 spring-boot-starter-parent 3.5.0 与
+                 spring-boot-dependencies 3.5.0 的 pluginManagement，**两处都没管 jacoco**
+                 （surefire 有），不写版本 Maven 会报"插件缺少版本"。
+                 报告落在各模块 target/site/jacoco/index.html。
+                 第一次引入要联网（本地 ~/.m2 里没有 org/jacoco），之后才能回到 -o。 -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.15</version>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 </project>

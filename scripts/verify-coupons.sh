@@ -73,7 +73,13 @@ MGR_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H 'Content-Type: appl
 # 门店单的 used_staff_id 该等于谁 —— 不写死 2，从库里读，避免"账号 id 恰好是 2"这种隐性前提
 MGR_ID=$(db "select id from staff where username='manager';")
 
-# 顾客注册 → 已注册则登录（与 verify-orders.sh 同一套；姓名用 ASCII，见文件头坑 1）
+# 顾客注册 → 已注册则登录（姓名用 ASCII，见文件头坑 1）
+# 函数体在本仓库有**六份拷贝**（彼此逐字一致）：verify-orders.sh /
+# verify-coupons.sh / verify-price.sh / verify-price-write.sh /
+# verify-pricing-authority.sh / verify-race.sh —— 就是下面这一个函数。
+# 脚本之间不互相 source：六份拷贝是故意的，要的就是"单跑任何一个都成立"。
+# md5（从 `login_or_register() {` 到收尾的 `}`）= 5d383e42ede9
+# （复核命令见 scripts/README.md 的"六份拷贝"一节；改任何一份都要同步改六份）
 login_or_register() {
   local name=$1 phone=$2 resp token
   resp=$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
@@ -102,10 +108,29 @@ PAY_AMT=$(awk -v b="$BASE_AMT" 'BEGIN{printf "%.2f", b*0.5}')
 SAVE_AMT=$(awk -v b="$BASE_AMT" -v a="$PAY_AMT" 'BEGIN{printf "%.2f", b-a}')
 
 # 准备阶段失败要立刻喊停：否则后面每条断言报的都是"券不属于这位顾客"，
-# 把一次登录失败误诊成抵扣逻辑坏了（Bug 22 的教训）
-for v in MGR_T MGR_ID CUST1 CUST2 CUST1_ID CUST2_ID PRICE; do
-  if [ -z "${!v}" ]; then echo "==> [准备失败] $v 为空，前置条件不成立，停止"; exit 1; fi
+# 把一次登录失败误诊成抵扣逻辑坏了（Bug 22 的教训）。
+# 判据分三种（**Bug 38** 的规矩：准备段自检要判**形状**，不是"有没有"）：
+#   · 票：非空即可 —— 票空了下游发出去的是 "Authorization: Bearer "，
+#     回来的是 401，看着像"越权/身份没传对"
+#   · id：必须**是数字** —— db() 把 stderr 丢了，MySQL 一挂它返回空串，
+#     而空串拼进 URL/SQL 不报错，只会让断言错得莫名其妙
+#   · 单价：小数，case 那套判不了，交给 awk 校验"数字，最多一个小数点"
+BAD=""
+for v in MGR_T CUST1 CUST2; do
+  [ -z "${!v}" ] && BAD="$BAD $v(票空)"
 done
+for v in MGR_ID CUST1_ID CUST2_ID; do
+  case "${!v}" in ''|*[!0-9]*) BAD="$BAD $v('${!v}')不是数字";; esac
+done
+if ! awk -v v="$PRICE" 'BEGIN{exit !(v ~ /^[0-9]+(\.[0-9]+)?$/)}'; then
+  BAD="$BAD PRICE('$PRICE')不是数字"
+fi
+if [ -n "$BAD" ]; then
+  echo "==> [准备失败] 前置条件不成立，停止：$BAD"
+  echo "             票长 manager=${#MGR_T} custA=${#CUST1} custB=${#CUST2}"
+  echo "             后端是否在 8081？manager/admin123 能否登录？"
+  exit 1
+fi
 echo "  店长 staff id=$MGR_ID   顾客A id=$CUST1_ID   顾客B id=$CUST2_ID"
 echo "  衬衫普洗单价=$PRICE  →  折前 $BASE_AMT / 5折后 $PAY_AMT / 抵扣 $SAVE_AMT"
 
@@ -207,8 +232,9 @@ check "B3 使用记录：used=1 / used_order_id 指向本单 / used_time 有值 
   "$(db "select concat_ws('|',used,if(used_time is null,'NULL','SET'),ifnull(used_order_id,'NULL'),ifnull(used_staff_id,'NULL')) from coupon_grabs where coupon_id=$CPN1 and customer_id=$CUST1_ID;")" \
   "1|SET|$B1_ID|NULL"
 
-MINE=$(curl -s "$BASE/api/coupons/mine" -H "Authorization: Bearer $CUST1")
-checkNot "B4 用掉的券从「我的券」里消失" "$MINE" "\"couponId\":$CPN1,"
+# 原先这里有一条 B4「用掉的券从『我的券』里消失」（单独查一次 CPN1）。
+# 删掉的理由是它被 H4 **严格包含**：H4 用同一把刀切三张券（CPN1/CPN2/CPN3），
+# 而 B4 只是其中最弱的那一份 —— 同一属性、同一端点，两份拷贝没有第二种可能的结果
 
 echo
 echo "########## C. 门店单用券（2026-09-12 放开门店单用券）##########"
@@ -301,7 +327,8 @@ check "G2 被拒的订单没留下痕迹（券还是未使用）" \
 echo
 echo "########## H. GET /api/coupons/mine ##########"
 
-# 重新取一次：B 段那份是 CPN4 还没过期时取的，H2 要看的是它**过期之后**的样子
+# 这一段才第一次查「我的券」：H2 要看的正是 CPN4 **过期之后**的样子
+# （G 段刚把它的 end_time 改到过去）
 MINE=$(curl -s "$BASE/api/coupons/mine" -H "Authorization: Bearer $CUST1")
 check "H1 顾客查我的券 → 200" "$MINE" '"code":200'
 
@@ -341,6 +368,58 @@ check "I2 接口返回的券名是同一串字节（读出去也没坏）" \
   "^$CN_NAME_HEX\$"
 
 echo
+echo "########## J. 发券的两道闸（2026-09-18 Bug 42）##########"
+# 这一段是本脚本**第一次以顾客身份**碰 /api/coupons、也是第一次拿越界的折扣率发券。
+# 两条都是 2026-09-18 才补的闸，补之前各是一条能直接变成钱的路：
+#   · 顾客票 POST /api/coupons → **200**。JwtInterceptor 遇到非 staff 直接 return
+#     （"顾客能用哪些接口由各 Controller 自己判断"），而 createCoupon 忘了判断 ——
+#     于是任何一张有效票都能给自己发券，折扣低到 0.01 都行；60 秒后定时任务
+#     把它推成"进行中"，抢下来下单抵扣。**不是脏数据，是收入**
+#   · discount 越界（0 / 负数 / >1）→ **200**。券建得出来、Redis 预热好、
+#     顾客抢到手，一路到下单才被 Order.applyCoupon 抛"折扣率不合法"——
+#     那时报错的是顾客，填错的是店长，两个人隔着好几步
+#
+# 这一段的对照组就是上面的准备段：同样是店长、同样的 /api/coupons，
+# 0.50 的四张券**建得出来**（CPN1~CPN4 都拿到了 id）。所以下面这几条 400/401
+# 不是"这个端点坏了"，是闸在按折扣率和身份分人
+
+printf '{"name":"CPN-E2E-HACK","discount":0.01,"totalStock":100,"startTime":"%s","endTime":"%s"}' \
+  "$NOW_START" "$NOW_END" > "$TMP/hack.json"
+check "J1 顾客 token 发券 → 401 请使用员工账号操作（一折券也不例外，票有效也没用）" \
+  "$(curl -s -X POST $BASE/api/coupons -H "Content-Type: application/json" \
+     -H "Authorization: Bearer $CUST1" --data-binary @"$TMP/hack.json")" \
+  "请使用员工账号操作"
+
+check "J1a 被拒之后库里没有这张券（不是「先 insert 再回 401」）" \
+  "$(db "select count(*) from coupons where name='CPN-E2E-HACK';")" "^0$"
+
+printf '{"name":"CPN-E2E-BADDISC","discount":1.01,"totalStock":100,"startTime":"%s","endTime":"%s"}' \
+  "$NOW_START" "$NOW_END" > "$TMP/baddisc.json"
+check "J2 店长发 1.01 折的券 → 400 折扣率必须大于 0 且不超过 1" \
+  "$(curl -s -X POST $BASE/api/coupons -H "Content-Type: application/json" \
+     -H "Authorization: Bearer $MGR_T" --data-binary @"$TMP/baddisc.json")" \
+  "折扣率必须大于 0 且不超过 1"
+
+check "J2a 越界的券没落库（拒绝发生在 insert / Redis 预热之前）" \
+  "$(db "select count(*) from coupons where name='CPN-E2E-BADDISC';")" "^0$"
+
+# 0 与负数共用一句判据（`<= 0`）。只探 0 的话，把判据改成 `== 0` 仍然全绿，
+# 而负折扣会让 total_amount 变成负数 —— 顾客下单反倒"欠"店里钱
+printf '{"name":"CPN-E2E-NEG","discount":-0.50,"totalStock":100,"startTime":"%s","endTime":"%s"}' \
+  "$NOW_START" "$NOW_END" > "$TMP/negdisc.json"
+check "J3 负折扣（-0.50）→ 400 同一句话（判据是 <= 0，不是 == 0）" \
+  "$(curl -s -X POST $BASE/api/coupons -H "Content-Type: application/json" \
+     -H "Authorization: Bearer $MGR_T" --data-binary @"$TMP/negdisc.json")" \
+  "折扣率必须大于 0 且不超过 1"
+
+echo
 echo "================================"
 echo "  通过 $PASS 项，失败 $FAIL 项"
 echo "================================"
+
+# 退出码就是断言结果 —— CI 用 `if bash "$s"` 判成败（.github/workflows/ci.yml:157），
+# 而在 **Bug 40** 之前本脚本最后一行是 echo：**永远退 0**。断言红成一片，
+# CI 照样打 OK（汇总行里那串"通过 X 项，失败 Y 项"还会照印，但 job 不会失败）——
+# 假绿从"断言层"搬到了"汇总层"，而这一层没有任何断言在看着它。
+# admin / auth / stores 三个一直是对的（它们本来就有这一行），这行是照它们补的。
+[ $FAIL -eq 0 ]

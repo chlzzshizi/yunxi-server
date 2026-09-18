@@ -28,8 +28,12 @@ priceOf() { db "select price from clothes_prices where category_id=$1 and wash_t
 
 # 姓名用 ASCII：Git Bash 会把 shell 里的中文按 GBK 发出去，后端按 UTF-8 解析会 400
 # （这是脚本的锅不是后端的；中文经文件投递的用例见 B1/G1）
-# 与 verify-orders.sh / verify-coupons.sh 里的同名函数**逐字一致** —— 不改字面量，
-# 三份复制是既有的约定（脚本之间不互相 source，跑单个脚本要能独立成立）
+# 函数体在本仓库有**六份拷贝**（彼此逐字一致）：verify-orders.sh /
+# verify-coupons.sh / verify-price.sh / verify-price-write.sh /
+# verify-pricing-authority.sh / verify-race.sh —— 就是下面这一个函数。
+# 脚本之间不互相 source：六份拷贝是故意的，要的就是"单跑任何一个都成立"。
+# md5（从 `login_or_register() {` 到收尾的 `}`）= 5d383e42ede9
+# （复核命令见 scripts/README.md 的"六份拷贝"一节；改任何一份都要同步改六份）
 login_or_register() {
   local name=$1 phone=$2 resp token
   resp=$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
@@ -56,10 +60,12 @@ CUST_T=$(login_or_register PriceWriterCust 13900000091)
 # 脚手架自检（Bug 38）。**空票必须当场停下**：原先这里只印一句"就绪"，票是空的也照印。
 # 印长度而不是票面值：空/非空一眼可判，也不把票写进 CI 的日志产物。
 if [ -z "$MGR_T" ] || [ -z "$CUST_T" ]; then
-  echo "  [致命] 脚手架没拿到 token（manager=${#MGR_T} 字符，customer=${#CUST_T} 字符）"
-  echo "         后端是否在 8081？manager/admin123 能否登录？"
+  echo "==> [准备失败] 脚手架没拿到 token（manager=${#MGR_T} 字符，customer=${#CUST_T} 字符）"
+  echo "             后端是否在 8081？manager/admin123 能否登录？"
   exit 1
 fi
+# 失败行一律 `==> [准备失败]`：九个脚本统一这一个串，方便在 CI 日志里一把 grep
+# （本脚本原先写的是 `  [致命]`，是第 0 步新写的两处之一，与其余六个不一致）
 echo "  manager/customer token 就绪（${#MGR_T} / ${#CUST_T} 字符）"
 TOKEN=$MGR_T
 
@@ -138,3 +144,10 @@ echo
 echo "================================"
 echo "  通过 $PASS 项，失败 $FAIL 项"
 echo "================================"
+
+# 退出码就是断言结果 —— CI 用 `if bash "$s"` 判成败（.github/workflows/ci.yml:157），
+# 而在 **Bug 40** 之前本脚本最后一行是 echo：**永远退 0**。断言红成一片，
+# CI 照样打 OK（汇总行里那串"通过 X 项，失败 Y 项"还会照印，但 job 不会失败）——
+# 假绿从"断言层"搬到了"汇总层"，而这一层没有任何断言在看着它。
+# admin / auth / stores 三个一直是对的（它们本来就有这一行），这行是照它们补的。
+[ $FAIL -eq 0 ]

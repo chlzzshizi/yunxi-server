@@ -1,7 +1,9 @@
 package com.yunxi.application.service;
 
+import com.yunxi.application.dto.CategoryView;
 import com.yunxi.application.dto.PriceItem;
 import com.yunxi.application.dto.PriceRow;
+import com.yunxi.application.dto.WashTypeView;
 import com.yunxi.common.BusinessException;
 import com.yunxi.domain.price.ClothesCategory;
 import com.yunxi.domain.price.ClothesPrice;
@@ -147,6 +149,33 @@ class PriceAppServiceTest {
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("至少要传一条价格");
         }
+
+        @Test
+        @DisplayName("价格列表整个为 null → 400（别的入口传进来的 null，不该是 NPE）")
+        void rejectNullList() {
+            // 和上面那条（传 List.of()）是同一句话的两个入口：null 只可能来自
+            // 非 HTTP 调用方（脚本、后台任务），在那些地方 NPE 会报成 500
+            assertThatThrownBy(() -> priceAppService.savePrices(SHIRT, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("至少要传一条价格");
+            verify(priceRepository, never()).savePrice(any(), any(), any());
+        }
+
+        @Test
+        @DisplayName("某一条的价格是 null → 400，不是到算钱时才 NPE")
+        void rejectNullPriceValue() {
+            // 判据是 price() == null || signum() < 0：负数那半边上面测过，
+            // 这半边（null）也要各走一次 —— 而"null 价"在库里的表现是
+            // clothes_prices.price 为 NULL，一路飘到订单算价那边才炸
+            when(priceRepository.findCategoryById(SHIRT))
+                    .thenReturn(Optional.of(leaf(SHIRT, "衬衫")));
+
+            assertThatThrownBy(() -> priceAppService.savePrices(
+                    SHIRT, List.of(new PriceItem(1L, null))))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessageContaining("不能为空或负数");
+            verify(priceRepository, never()).savePrice(any(), any(), any());
+        }
     }
 
     // ════════════════ 精洗派生 ════════════════
@@ -223,6 +252,20 @@ class PriceAppServiceTest {
         }
 
         @Test
+        @DisplayName("该分类**有价、但没有普洗那一行** → 手填精洗照样放行")
+        void allowManualRefinedWhenOnlyRefinedRowExists() {
+            // 与上一条（一行价都没有）不是同一件事：existingPlainPrice 是
+            // "从一批行里挑出普洗"，空表走的是流的 orElse，有行但不匹配走的是
+            // 过滤条件的另一支。羽绒服那种分类一开始就手填精洗，后来再看
+            // 就是"只有精洗行"的样子 —— 这一支断了，那个逃生舱就进不去了
+            existingPrices(price(2L, "35.00"));   // 只有精洗行
+
+            priceAppService.savePrices(SHIRT, List.of(item(2L, "60.00")));
+
+            verify(priceRepository).savePrice(SHIRT, 2L, new BigDecimal("60.00"));
+        }
+
+        @Test
         @DisplayName("单熨独立定价，不受普洗影响")
         void ironIsIndependent() {
             existingPrices(price(1L, "15.00"), price(2L, "35.00"));
@@ -289,6 +332,75 @@ class PriceAppServiceTest {
             w.setId(id);
             w.setName(name);
             return w;
+        }
+    }
+
+    // ════════════════ 分类与洗涤方式（前端组树、下拉用） ════════════════
+    //
+    // 这两条读路径薄得像张纸：一次仓储调用 + 一次 map。它们之前**整条 0 覆盖**，
+    // 连带两个出参 DTO 也是 0 —— 而 DTO 的 from 是唯一一次把领域对象搬到出参的搬运。
+    //
+    // 真正值得钉的不是"能返回"，是 leaf 这个字段：它是把
+    // ClothesCategory.isLeaf() 的判断**复制一份**给前端（见 CategoryView 类注释）。
+    // 搬错的后果不是脏数据（真正的闸在 savePrices 那边，同源同规则），
+    // 而是价目页把一级分类「上衣」画成可编辑的一行 —— 用户点进去，接口才回 400。
+
+    @Nested
+    @DisplayName("分类列表：leaf 是从领域判断搬出来的")
+    class ListCategories {
+
+        @Test
+        @DisplayName("一级 leaf=false、叶子 leaf=true，icon/sortOrder/parentId 原样搬")
+        void carriesLeafFlag() {
+            ClothesCategory top = root(TOPS, "上衣");
+            top.setIcon("/icons/tops.png");
+            top.setSortOrder(3);
+            when(priceRepository.findAllCategories())
+                    .thenReturn(List.of(top, leaf(SHIRT, "衬衫")));
+
+            List<CategoryView> rows = priceAppService.listCategories().data();
+
+            assertThat(rows).hasSize(2);
+            assertThat(rows.get(0).id()).isEqualTo(TOPS);
+            assertThat(rows.get(0).leaf()).isFalse();
+            assertThat(rows.get(0).icon()).isEqualTo("/icons/tops.png");
+            assertThat(rows.get(0).sortOrder()).isEqualTo(3);
+            assertThat(rows.get(0).parentId()).isNull();
+
+            assertThat(rows.get(1).id()).isEqualTo(SHIRT);
+            assertThat(rows.get(1).name()).isEqualTo("衬衫");
+            assertThat(rows.get(1).leaf()).isTrue();
+            assertThat(rows.get(1).parentId()).isEqualTo(TOPS);
+        }
+
+        @Test
+        @DisplayName("空表 → 空列表，不是 null（前端 .map 不炸）")
+        void emptyIsEmptyList() {
+            when(priceRepository.findAllCategories()).thenReturn(List.of());
+
+            assertThat(priceAppService.listCategories().data()).isEmpty();
+        }
+    }
+
+    @Nested
+    @DisplayName("洗涤方式列表：固定 3 种")
+    class ListWashTypes {
+
+        @Test
+        @DisplayName("三个字段原样搬（前端下拉显示的就是 name / description）")
+        void carriesFields() {
+            WashType refined = new WashType();
+            refined.setId(2L);
+            refined.setName("精洗");
+            refined.setDescription("普洗 + 20");
+            when(priceRepository.findAllWashTypes()).thenReturn(List.of(refined));
+
+            List<WashTypeView> rows = priceAppService.listWashTypes().data();
+
+            assertThat(rows).hasSize(1);
+            assertThat(rows.get(0).id()).isEqualTo(2L);
+            assertThat(rows.get(0).name()).isEqualTo("精洗");
+            assertThat(rows.get(0).description()).isEqualTo("普洗 + 20");
         }
     }
 }

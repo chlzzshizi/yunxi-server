@@ -17,5 +17,14 @@
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
         </dependency>
+
+        <!-- 单元测试：JUnit 5 + AssertJ + Mockito（版本由 spring-boot-starter-parent 管理）
+             本模块原先一个测试都没有（enum/BusinessException 一直靠上层顺带覆盖到），
+             fromCode 那批断言住在 scripts/verify-*.sh 里 —— 纯输入输出的活，搬到这层。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>

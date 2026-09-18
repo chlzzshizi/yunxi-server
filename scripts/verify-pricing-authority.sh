@@ -35,8 +35,12 @@ db() { docker exec yunxi-mysql mysql -uroot -pqwaszx123 yunxi -N \
 # 顾客注册 → 已注册则登录，返回 token。
 # 姓名用 ASCII：Git Bash 会把 shell 里的中文按 GBK 发出去，后端按 UTF-8 解析会 400
 # （这是脚本的锅不是后端的；中文经文件投递的用例见 B1/G1）
-# 与 verify-orders.sh / verify-coupons.sh / verify-price-write.sh 里的同名函数**逐字一致**
-# （脚本之间不互相 source，四份拷贝是故意的；要的就是"单跑任何一个都成立"）
+# 函数体在本仓库有**六份拷贝**（彼此逐字一致）：verify-orders.sh /
+# verify-coupons.sh / verify-price.sh / verify-price-write.sh /
+# verify-pricing-authority.sh / verify-race.sh —— 就是下面这一个函数。
+# 脚本之间不互相 source：六份拷贝是故意的，要的就是"单跑任何一个都成立"。
+# md5（从 `login_or_register() {` 到收尾的 `}`）= 5d383e42ede9
+# （复核命令见 scripts/README.md 的"六份拷贝"一节；改任何一份都要同步改六份）
 login_or_register() {
   local name=$1 phone=$2 resp token
   resp=$(curl -s -X POST $BASE/api/auth/customer/register -H "Content-Type: application/json" \
@@ -79,11 +83,13 @@ case "$CUST_ID" in
   ''|*[!0-9]*) BAD="$BAD customerId($CUST_ID)不是数字";;
 esac
 if [ -n "$BAD" ]; then
-  echo "  [致命] 脚手架没就绪：$BAD"
-  echo "         票长 manager=${#MGR_T} admin=${#ADMIN_T} customer=${#CUST_T}"
-  echo "         后端是否在 8081？manager/admin123 与 admin/admin123 能否登录？"
+  echo "==> [准备失败] 脚手架没就绪：$BAD"
+  echo "             票长 manager=${#MGR_T} admin=${#ADMIN_T} customer=${#CUST_T}"
+  echo "             后端是否在 8081？manager/admin123 与 admin/admin123 能否登录？"
   exit 1
 fi
+# 失败行一律 `==> [准备失败]`：九个脚本统一这一个串，方便在 CI 日志里一把 grep
+# （本脚本原先写的是 `  [致命]`，是第 0 步新写的两处之一，与其余六个不一致）
 echo "  manager/admin/customer token 就绪（${#MGR_T} / ${#ADMIN_T} / ${#CUST_T} 字符）；顾客 13900000091 的 id = $CUST_ID"
 
 # 建单 <token> <body>
@@ -222,3 +228,12 @@ echo
 echo "================================"
 echo "  通过 $PASS 项，失败 $FAIL 项"
 echo "================================"
+
+# 退出码就是断言结果 —— CI 用 `if bash "$s"` 判成败（.github/workflows/ci.yml:157），
+# 而在 **Bug 40** 之前本脚本最后一行是 echo：**永远退 0**。断言红成一片，
+# CI 照样打 OK（汇总行里那串"通过 X 项，失败 Y 项"还会照印，但 job 不会失败）——
+# 假绿从"断言层"搬到了"汇总层"，而这一层没有任何断言在看着它。
+# 注意 F 段那三条是**条件恒真**的（建单压根没发出去时 F1/F2/F3 无条件通过），
+# 准备段那个 CUST_ID 形状守卫是它们唯一的兜底 —— 现在再加一层：退出码。
+# admin / auth / stores 三个一直是对的（它们本来就有这一行），这行是照它们补的。
+[ $FAIL -eq 0 ]

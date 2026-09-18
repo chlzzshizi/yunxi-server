@@ -108,5 +108,24 @@ class PricePolicyTest {
             assertThat(new ClothesPrice(13L, PricePolicy.PLAIN, null).isSupported())
                     .isFalse();
         }
+
+        @Test
+        @DisplayName("负数不支持 —— 判据是 signum() > 0，正负两侧都得钉")
+        void negativeNotSupported() {
+            // 负价从接口进不来，写路径上已经有两道闸（PriceController 的形状校验
+            // 和 PriceAppService.savePrices 的"价格不能为空或负数"），
+            // 而"0 是合法的不支持"那条也在应用层测过了（PriceAppServiceTest）。
+            // 这里测的是**领域方法不假设调用方校验过** —— 和 Order.applyCoupon
+            // 里那句"领域方法不该假设调用方一定校验过"是同一个理由。
+            // 价值在于把判据钉死在「> 0」：写成 price != null 的话负价会变成"支持"，
+            // 前端不置灰、下单也不挡 —— 洗一件倒贴 8 块
+            assertThat(new ClothesPrice(13L, PricePolicy.PLAIN, new BigDecimal("-8.00"))
+                    .isSupported()).isFalse();
+            assertThat(new ClothesPrice(13L, PricePolicy.PLAIN, new BigDecimal("-0.01"))
+                    .isSupported()).isFalse();
+            // 正负交界处：0.01 是支持的最小正数，符号一变结论就翻
+            assertThat(new ClothesPrice(13L, PricePolicy.PLAIN, new BigDecimal("0.01"))
+                    .isSupported()).isTrue();
+        }
     }
 }
