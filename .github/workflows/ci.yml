@@ -159,6 +159,17 @@ jobs:
             else
               mark="FAIL"
               FAILED=$((FAILED + 1))
+              # ── 红了就把"红在哪几条"顶到 checks 摘要里 ──
+              # 起因是真的发生过一次：这一步红了，但外面只看得见
+              # "Process completed with exit code 1" —— 到底是哪个脚本、哪几条断言，
+              # 得去下载这一步的日志才看得见，而**下载日志要仓库 admin 权限**
+              # （匿名 API 回 403），于是现场只剩一个 exit code。
+              # ::error:: 会变成**公开可读的 check-run annotation**，人和工具都能取。
+              # 换行必须转成 %0A（annotation 正文是单行的，原样换行会被截断），
+              # 而 % 要先转成 %25，否则正文里的百分号会被当成转义引导符
+              detail=$(grep -E '\[FAIL\]|期望含|实际:|准备失败|通过 ' "/tmp/e2e/$name.log" \
+                | head -30 | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')
+              echo "::error title=$name 红了::$detail"
             fi
             tail -8 "/tmp/e2e/$name.log"
             echo "::endgroup::"
