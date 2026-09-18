@@ -104,7 +104,9 @@ bash scripts/verify-orders.sh
 > orders 69 / price-write 29 / price 26 / pricing-authority 24 / race 2 / stores 56，
 > 自印数与 `[OK]` 数逐个相等）；单测 394 → **395**（interfaces 52 → 53）。
 > 反向探针（`/tmp` 副本上把 J4 期望值改错 → `[FAIL] J4` + 退 1）也做了，仓库里的脚本没被改。
-> ⚠️ 这三个数都是**本机**的 —— 见上一条（Bug 46 的教训）。
+> **CI 那一侧也跑了**：`34bddb0` 的 workflow 两个 job 全绿（「单元测试」+「真机验收（九个脚本）」），
+> 也就是这 392 条在**全新库 / Linux / 快机器**上同样是绿的（Bug 46 暴露问题的那一侧）。
+> ⚠️ 本机的 392 与 CI 的绿是**两次跑**：都记，别把其中一个说成全部。
 
 > `verify-orders.sh` 的 69 = 原有 38 + **H/I 两段 27** + **J 段 4**（2026-09-13 新增，当日已跑通）。
 > `verify-pricing-authority.sh` 是 24 而不是旧表里的 22（步骤 4 加过两条）。
