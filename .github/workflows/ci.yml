@@ -45,8 +45,39 @@ jobs:
 
       # 不写 -o（离线）：CI 上 ~/.m2 是空的，离线会直接失败。
       # 本地跑才用 -o，那是为了不联网。
+      #
+      # 红了要把"红在哪几条"顶成 annotation（2026-09-19 加）：
+      # `f7979f4` 那次 unit job 红了 —— 一份**只改了 markdown** 的提交，而同一个
+      # 代码的上一跑是绿的。外面只看得见 "Process completed with exit code 1"，
+      # 想读这一步的日志得仓库 admin 权限（匿名 API 回 403），于是连"是测试红了
+      # 还是依赖没拉下来"都分不出 —— 和 e2e 那步当初遇到的是同一件事（见下面注释）。
+      # ::error:: 会变成**公开可读的 check-run annotation**；换行转 %0A，% 先转 %25。
       - name: ./mvnw test
-        run: ./mvnw -B test
+        run: |
+          set +e
+          ./mvnw -B test > /tmp/unit.log 2>&1
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            # 先按"测试红了"抓；抓不到再退回看构建类错误（依赖/插件/缓存坏了）
+            detail=$(grep -E '<<< (FAILURE|ERROR)!|^\[ERROR\] Tests run:|^\[ERROR\] Failed to execute goal' /tmp/unit.log \
+              | head -30)
+            [ -z "$detail" ] && detail=$(grep -E '^\[ERROR\]' /tmp/unit.log | head -20)
+            detail=$(echo "$detail" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=单元测试红了::${detail:-（日志里没抓到 ERROR 行）}"
+            echo "---- 日志尾部 40 行 ----"
+            tail -40 /tmp/unit.log
+          fi
+          exit "$rc"
+
+      # 红了连带把 surefire 报告传上来（expected/actual 全文在这里，annotation 放不下）。
+      # 与 e2e 那步同一个理由：否则排查只能靠猜。
+      - name: 失败时上传 surefire 报告
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/**'
+          if-no-files-found: ignore
 
   e2e:
     name: 真机验收（九个脚本）
