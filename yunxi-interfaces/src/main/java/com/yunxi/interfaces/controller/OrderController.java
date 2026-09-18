@@ -206,20 +206,32 @@ public class OrderController {
      * 所有店长都能管理所有门店的订单（设计文档 §4.2），所以拿不到 storeId
      * 也不再意味着"越权"，而是"这单不知道算哪个店"。
      *
-     * 谁还可能走到"拿不到 storeId"这一支：只剩**旧 token**（签发时没有 storeId claim）。
      * 管理员曾在这里被单独提示"请用店长账号"，2026-09-11 权限收回后，
      * 管理员在 JwtInterceptor 的角色闸门就被 403 拦在 /api/orders 之外了，
      * 根本进不到这个方法 —— 所以那条分支已经删掉，别再加回来。
      *
-     * 订单要有"物理的店"（取件地址落在哪家店），所以这一支不能让：
-     * 没有店就不知道这单算谁的，只能说清楚让用户重新登录拿新 token。
+     * **谁还会走到这一支：只有 `staff.store_id` 真的是 NULL 的店长**（2026-09-19 更正，Bug 36）。
+     * 建/改店长时 `storeId` 是**允许为空**的（`StaffAdminAppService` 只在非空时才校验它存在），
+     * 所以"没有门店的店长"是个**合法状态**、不是坏数据 —— 他能登录、能读价目表、能读门店列表，
+     * 只是开不了门店单（订单要有"物理的店"：取件地址落在哪家）。
+     *
+     * 这里原先写着"只剩**旧 token**"（签发时没有 storeId claim）—— 那句话在放开无店店长之后
+     * 就是假的了。而旧 token 这条路**已经绝迹**：票的有效期是 24 小时
+     * （`application.yml` 的 `jwt.expiration=86400000`），storeId 是 2026-09-11 随角色
+     * 一起签进 claim 的，那之前的票 09-12 就全过期了。所以这一支今天**只可能**是无店店长。
+     *
+     * 文案随之改过一次（2026-09-19 拍板"说实话，仍然拒绝"，Bug 36）：原先报 401
+     * 「登录信息已升级，请重新登录」—— 对一个"按设计就没有门店"的账号，**重登一万次也不会
+     * 带上门店**，那句话把"你没有门店"说成了"你的票过期了"（Bug 20 的形状）。
+     * 现在报 403，说清是什么事、该找谁。换掉 401 还有第二个理由：401 在本项目里到处都
+     * 意味着"重新登录"，客户端会照着去做一件没有用的事。
      */
     private Long requireStaffStore(HttpServletRequest http) {
         Long storeId = (Long) http.getAttribute("storeId");
         if (storeId != null) {
             return storeId;
         }
-        throw new BusinessException(401, "登录信息已升级，请重新登录");
+        throw new BusinessException(403, "账号还没有归属门店，无法开单，请联系管理员分配门店");
     }
 
     private Long requireCustomer(HttpServletRequest http) {

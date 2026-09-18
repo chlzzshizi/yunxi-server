@@ -127,6 +127,61 @@ check "A5 顾客 token 结账 → 401" \
   "$(curl -s -X POST "$BASE/api/orders/1/final-pay?payMethod=cash" \
      -H "Authorization: Bearer $CUST1")" "请使用员工账号操作"
 
+# ── A6：无店店长建门店单（**Bug 36**）──
+#
+# 这号是**用管理员的接口建的**，不是 SQL：Bug 36 的要点正是"没有门店的店长是一条
+# 走得通的正路"（`CreateStaffRequest.storeId` 上写着「店长允许为空」）。若用 SQL 造一个
+# 别处根本造不出来的状态、再断言它被拦住，证的是自己写下的前提，不是产品行为。
+# 第二次跑这条会 400「用户名已存在」—— 那是**预期**的（建号本身那条断言在
+# verify-admin.sh 的 A6），所以这里不看返回值，只看下面那张票
+NS_USER=mgrnostore
+curl -s -X POST $BASE/api/staff -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ADMIN_T" \
+  -d "{\"username\":\"$NS_USER\",\"password\":\"admin123\",\"name\":\"NoStore\",\"role\":1,\"phone\":\"13700000099\"}" \
+  > /dev/null
+
+NS_ID=$(db "select id from staff where username='$NS_USER';")
+NS_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
+  -d "{\"username\":\"$NS_USER\",\"password\":\"admin123\"}")" token)
+# 兜底：万一上一轮之后有人改过这号的密码（上面那条建号路再跑只会是 400，改不回来）。
+# 这是**脚手架自愈**，不是被测逻辑 —— 走的是管理员重置密码接口（它自己的断言在
+# verify-admin.sh 的 F 段）。自愈只修"票拿不到"，不改下面要断言的 store_id
+if [ -z "$NS_T" ]; then
+  curl -s -X PUT "$BASE/api/staff/$NS_ID/password" -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $ADMIN_T" -d '{"password":"admin123"}' > /dev/null
+  NS_T=$(jqf "$(curl -s -X POST $BASE/api/auth/staff/login -H "Content-Type: application/json" \
+    -d "{\"username\":\"$NS_USER\",\"password\":\"admin123\"}")" token)
+fi
+# 准备守卫（Bug 38 的规矩：就绪是断言不是台词）。第二条不能省：哪天有人给这号分了门店，
+# A6 会退化成一句"403 没出现"的**假红**，而真因（他已经不是无店店长了）一个字都看不见
+if [ -z "$NS_T" ] || [ -z "$NS_ID" ]; then
+  echo "==> [准备失败] 无店店长 $NS_USER 没就绪（票长 ${#NS_T}，id='$NS_ID'）"; exit 1
+fi
+NS_STORE=$(db "select coalesce(store_id,'NULL') from staff where id=$NS_ID;")
+if [ "$NS_STORE" != "NULL" ]; then
+  echo "==> [准备失败] $NS_USER (id=$NS_ID) 的 store_id='$NS_STORE'，不是 NULL"
+  echo "              A6 要测的是「没有门店的店长」，这号已经不是了（谁给他分了门店？）"; exit 1
+fi
+echo "  无店店长 $NS_USER id=$NS_ID 票长=${#NS_T} store_id=NULL"
+
+NS_ORDER=$(curl -s -X POST $BASE/api/orders -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $NS_T" \
+  -d "{\"source\":1,\"customerId\":$CUST1_ID,\"items\":[{\"categoryId\":11,\"washTypeId\":1,\"quantity\":1}]}")
+# 2026-09-19 拍板前，这里报的是 **401「登录信息已升级，请重新登录」** ——
+# 对一个按设计就没有门店的账号，"重新登录"是一件**没有用**的动作（Bug 20 的形状：
+# 把 A 说成了 B）。改成 403 的理由有二：说清是什么事、以及 401 在本项目里
+# 到处都意味着"重新登录"，客户端会照着去做那件没用的事
+check "A6 无店店长建门店单 → 403（仍然拒绝，但说的是真话）" "$NS_ORDER" '"code":403'
+check "A6b 文案说清了是什么事、该找谁" "$NS_ORDER" "账号还没有归属门店，无法开单，请联系管理员分配门店"
+# checkNot 是必须的另一半：A6b 只查"说了什么"，有人加回一句"请重新登录"照样全绿。
+# 这条钉的是**这种病**（指向做不到的动作），不是这一句话的措辞
+checkNot "A6c 这句里不许再出现「重新登录」—— 那正是 Bug 36 的病（假成因）" \
+  "$NS_ORDER" "重新登录"
+# 对照组。少了它，"403 是因为票坏了/号停用了"和"403 是因为他没门店"在脚本里长得一模一样：
+# 同一张票读别的接口是 200，被拒的才**只有**这个动作（门店单要有物理的店）
+check "A6d 对照：同一张无店店长的票读价目表 → 200（账号本身是好的）" \
+  "$(curl -s "$BASE/api/prices" -H "Authorization: Bearer $NS_T")" '"code":200'
+
 echo
 echo "########## B. 创建订单 ##########"
 
