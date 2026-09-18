@@ -164,6 +164,19 @@ check "C2 明细数量为 0 → 400" \
      -d "{\"source\":1,\"customerId\":$CUST1_ID,\"items\":[{\"categoryId\":11,\"washTypeId\":1,\"quantity\":0}]}")" \
   "数量必须为正整数"
 
+# C2b 与 C2 只差一个符号：判据写 `<= 0` 还是 `== 0`，这条能分开。
+# 负数是另一件事，不是 0 的重复 —— 单价永远是正的，负数量是唯一能把明细
+# 做成负数的手法，能和其他明细**对冲**把总额压低（少付钱还判付清）。
+#
+# 说明分工：这条证的是**最外层那道闸**（OrderController:59 的 400 文案）。
+# 过了 controller 之后是域层还是应用层拦的，脚本看不出来 —— 那两道由单测钉
+# （OrderTest.NonPositiveQuantityRejected / OrderAppServiceTest.rejectNonPositiveQuantity），
+# 它们证的是"换定时任务、脚本、第二个前端这些入口进来同样绕不掉"。
+check "C2b 明细数量为负数 → 400（判据是 <= 0，不是 == 0）" \
+  "$(curl -s -X POST $BASE/api/orders -H "Content-Type: application/json" -H "Authorization: Bearer $MGR_T" \
+     -d "{\"source\":1,\"customerId\":$CUST1_ID,\"items\":[{\"categoryId\":11,\"washTypeId\":1,\"quantity\":-1}]}")" \
+  "数量必须为正整数"
+
 check "C3 明细缺 categoryId → 400" \
   "$(curl -s -X POST $BASE/api/orders -H "Content-Type: application/json" -H "Authorization: Bearer $MGR_T" \
      -d "{\"source\":1,\"customerId\":$CUST1_ID,\"items\":[{\"washTypeId\":1,\"quantity\":1,\"unitPrice\":15.00}]}")" \

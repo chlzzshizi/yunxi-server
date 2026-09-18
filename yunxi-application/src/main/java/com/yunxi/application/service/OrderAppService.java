@@ -340,6 +340,17 @@ public class OrderAppService {
                     || c.washTypeId() == null || c.quantity() == null) {
                 throw new BusinessException("第 " + no + " 条明细缺少衣物分类、洗涤方式或数量");
             }
+            // 数量必须为正整数（2026-09-19 拍板，补的是下面这段注释自己立的规矩）：
+            // `quantity=0` 时这条明细的 subtotal 是 0.00 —— 它是求和的中性元，
+            // 所以**一条 0 就能把 totalAmount 拖到 0**，又走回 Bug 43 那条路
+            // （pay(0) 同时满足"全额"和"0"两个条件 → requirePaidOff 放行 → 白洗到终态 7）。
+            // 负数更坏：单价永远是正的（价目表那边 `signum() > 0` 卡着），
+            // 负数量是唯一能把明细做成负数的手法，能和别的明细**对冲**把总额压低 ——
+            // 少付钱还判"付清了"，而且 "-1 件衬衫"会直接落库。
+            // 文案与 OrderController 那条**逐字相同**：同一个错误不该有两种说法。
+            if (c.quantity() <= 0) {
+                throw new BusinessException("第 " + no + " 条明细数量必须为正整数");
+            }
             items.add(new OrderItem(c.categoryId(), c.washTypeId(),
                     c.quantity(), c.photos()));
         }

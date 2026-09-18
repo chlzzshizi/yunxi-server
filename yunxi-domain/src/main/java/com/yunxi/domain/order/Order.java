@@ -50,12 +50,28 @@ public class Order {
      * 一分钱没收。原先唯一的闸在 `OrderController:50-52`，换定时任务 / 后台脚本 /
      * 第二个前端就绕过去了 —— 与 `fillExpressNo` 的长度校验同一个理由：
      * **订单自己的不变量，换任何入口进来都绕不掉**。
+     *
+     * **数量必须为正整数**（2026-09-19 补的第三道闸，紧挨着上一道）：空明细只是
+     * "怎么把总额弄成 0"的一种输入；`quantity=0` 的明细 subtotal 也是 0.00 ——
+     * **同一条路，另一个入口**。负数则能和其他明细对冲，把总额压到"付得起的那个数"。
+     *
+     * 闸放在这里而不是 `OrderItem` 构造器：那个带单价的构造器是**从库里恢复**用的
+     * （注释自己写着），把规则塞进去，历史脏数据一读就炸，而这不是它该管的事 ——
+     * 建单才是不变量成立的地方。
      */
     public Order(String orderNo, Long storeId, Long customerId,
                  OrderSource source, List<OrderItem> items) {
         if (items == null || items.isEmpty()) {
             // 与 OrderController 那句用词一致：同一个错误不该有两种说法
             throw new BusinessException("订单至少要有一条明细");
+        }
+        for (int i = 0; i < items.size(); i++) {
+            OrderItem it = items.get(i);
+            if (it == null || it.getQuantity() <= 0) {
+                // 文案与应用层 / 接口层逐字一致；这里带序号是因为到了这一层，
+                // 调用方可能压根没分序号（定时任务、脚本）
+                throw new BusinessException("第 " + (i + 1) + " 条明细数量必须为正整数");
+            }
         }
         this.orderNo = orderNo;
         this.storeId = storeId;

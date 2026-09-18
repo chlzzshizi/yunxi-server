@@ -49,10 +49,14 @@ class OrderItemTest {
         @Test
         @DisplayName("数量 0 → 0.00（不抛，也不是 null —— 它是求和的中性元）")
         void zeroQuantity() {
-            // "数量必须为正整数"是**下单入口**的形状校验（OrderController 那条
-            // 400 的文案就是它），明细自己不管这一层。真塞进 0 时它老实算 0，
-            // 于是一张全是 0 件的订单总额也是 0 —— 这正是 OrderTest 末尾
-            // "空明细能走到终态"那条钉住的组合的另一半
+            // 明细自己**不算钱以外的事**：subtotal 是纯算术，单价 × 数量，0 件老实算 0。
+            // "数量必须为正整数"是**建单**那条路上的形状校验，2026-09-19 起三层都有：
+            // OrderController:59（400 的文案）、OrderAppService.toItems、
+            // Order 构造器 —— 也就是这张单子无论从哪个门进来都建不出来。
+            //
+            // 这里保留"0 件算出 0.00"这条，是因为它是 OrderTest 里那道闸的**理由**：
+            // 正因为中性元是 0（而不是抛），一条 0 件明细才能把总额拖到 0，
+            // 才有白洗到终态 7 那条路。把这条删掉，"闸为什么必须在那儿"就没了证据
             assertThat(item(0, new BigDecimal("15.00")).subtotal())
                     .isEqualByComparingTo("0");
         }

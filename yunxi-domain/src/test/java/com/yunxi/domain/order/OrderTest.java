@@ -23,8 +23,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   2. 非法流转（未支付推进、终态推进、未付清走终态、重复支付）
  *   3. 支付金额校验、优惠券抵扣（含上界恰好 1.0）、快递单号录入（含 emoji 边界）
  *   4. 明细列表是只读视图（getItems）
- *   5. **两条曾经是缺口、2026-09-18 已修**：空明细与 source=null ——
- *      见文件末尾那段，原先钉的是缺口本身，现在钉的是补上的那两道闸
+ *   5. **三条曾经是缺口、都在文件末尾那段**：空明细与 source=null（2026-09-18 已修）、
+ *      数量必须为正整数（2026-09-19 拍板补的第三道）—— 原先钉的是缺口本身，
+ *      现在钉的是补上的闸
  *
  * 2026-09-11 口径：码值连号 1~7，7 是通用终态，
  * 门店单 1→2→3→4→5→7、网单 1→2→3→4→6→7，两条路**都**要付清才能到 7。
@@ -607,12 +608,16 @@ class OrderTest {
         }
     }
 
-    // ════════════════ 两个曾经的缺口 —— 2026-09-18 已修，这里钉的是补上的闸 ════════════════
+    // ═══════════ 曾经的缺口 —— 已修，这里钉的是补上的闸（09-18 两道 / 09-19 一道）═══════════
     //
-    // 这两个 Nested 原先叫"钉住现状"：当时刻意不写会红的测试，只把缺口本身钉死，
+    // 前两个 Nested 原先叫"钉住现状"：当时刻意不写会红的测试，只把缺口本身钉死，
     // 并在 docs/bug-record.md 记了账。2026-09-18 深夜用户拍板修，于是它们翻了个面 ——
     // 现在钉的是**域层的第二道闸**。留在此处的理由和当初一样：
     // 谁把闸拆了，先在这里红，而不是等库里出现了 0 元订单才发现。
+    //
+    // 第三个 Nested（数量 ≤ 0）是 2026-09-19 拍板补的：它是 Bug 43 记账时
+    // 自己标出来的"边界：quantity=0 仍是同一条路，本轮没动（口径要人定）"，
+    // 口径当天定了 —— 走"拦"。
 
     @Nested
     @DisplayName("空明细：构造当场拒（域层第二道闸）")
@@ -650,6 +655,62 @@ class OrderTest {
         void oneItemStillWorks() {
             assertThat(newOrder(OrderSource.STORE).getTotalAmount())
                     .isEqualByComparingTo(TOTAL);
+        }
+    }
+
+    @Nested
+    @DisplayName("数量必须为正整数：构造当场拒（域层第三道闸，2026-09-19 拍板）")
+    class NonPositiveQuantityRejected {
+
+        @Test
+        @DisplayName("quantity=0 → 构造就抛；它就是「怎么把总额弄成 0」的另一个输入")
+        void zeroQuantityRejected() {
+            // 空明细那道闸挡的是"没有明细"，挡不住"有明细、单价也定好了，但数量是 0"：
+            // subtotal() = 单价 × 数量，数量 0 得 0.00 —— 它是求和的中性元，
+            // 一条 0 就能把 totalAmount 拖到 0，后面四步（pay / requirePaidOff /
+            // finish / 终态）和空明细那条路**一模一样**。
+            // 单价这里是**填好的**（15.00），专门排除"0 元是因为没定价"这种解释。
+            // 这条闸在 2026-09-19 之前只有 OrderController:59 一道，域层没有。
+            assertThatThrownBy(() -> new Order("YX-QTY-0001", 1L, 1L, OrderSource.STORE,
+                    List.of(new OrderItem(1L, 1L, 0, new BigDecimal("15.00"), null))))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessage("第 1 条明细数量必须为正整数");
+        }
+
+        @Test
+        @DisplayName("quantity=-1 → 同一句话拒掉（负数量能把别的明细对冲掉）")
+        void negativeQuantityRejected() {
+            // 负数是另一件事，不是 0 的重复：单价永远是正的（价目表那边 signum() > 0），
+            // 负数量是唯一能把明细做成负数的手法 —— 一条 -1 件就能把总额压到
+            // "少付钱还判付清"，而且 "-1 件衬衫"会直接落库。
+            // 判据写成 `<= 0` 一条，两种坏输入共用一句话，不拆成两处
+            assertThatThrownBy(() -> new Order("YX-QTY-0002", 1L, 1L, OrderSource.ONLINE,
+                    List.of(new OrderItem(1L, 1L, -1, new BigDecimal("15.00"), null))))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessage("第 1 条明细数量必须为正整数");
+        }
+
+        @Test
+        @DisplayName("坏的在第几条就报第几条（不是永远报「第 1 条」）")
+        void reportsTheRightIndex() {
+            // 到了域层，调用方可能压根没分序号（定时任务、脚本），
+            // 所以这句话自己带序号 —— 报错位置要指得到那条真坏的明细
+            assertThatThrownBy(() -> new Order("YX-QTY-0003", 1L, 1L, OrderSource.STORE,
+                    List.of(new OrderItem(1L, 1L, 2, new BigDecimal("15.00"), null),
+                            new OrderItem(2L, 1L, 0, new BigDecimal("20.00"), null))))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessage("第 2 条明细数量必须为正整数");
+        }
+
+        @Test
+        @DisplayName("对照：数量 1 和 2 都正常建出来（闸没做成「只许 1 件」）")
+        void positiveQuantitiesStillWork() {
+            assertThat(newOrder(OrderSource.STORE).getTotalAmount())
+                    .isEqualByComparingTo(TOTAL);                       // 2 件 × 15.00
+
+            Order one = new Order("YX-QTY-0004", 1L, 1L, OrderSource.STORE,
+                    List.of(new OrderItem(1L, 1L, 1, new BigDecimal("15.00"), null)));
+            assertThat(one.getTotalAmount()).isEqualByComparingTo(new BigDecimal("15.00"));
         }
     }
 

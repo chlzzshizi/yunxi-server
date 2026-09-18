@@ -286,6 +286,52 @@ class OrderAppServiceTest {
             // 形状都没对上就别白查一次价目表（"校验在算价之前"）
             verify(priceRepository, never()).findPricesByCategoryIds(any());
         }
+
+        @Test
+        @DisplayName("数量 ≤ 0 → 400 带序号；0 与负数共用一条判据，同样在算价之前")
+        void rejectNonPositiveQuantity() {
+            // 上面那条测的是"字段缺了"，这条测的是"字段都在、值不合法" ——
+            // 两种形状的修法完全不同：一个是调用方漏传，一个是调用方填错。
+            //
+            // quantity=0 的明细 subtotal 是 0.00（它是求和的中性元），**一条 0 就能
+            // 把 totalAmount 拖到 0** → 又走回 Bug 43 那条路（pay(0) 同时满足"全额"
+            // 和"洗后付的 0" → requirePaidOff 放行 → 白洗到终态 7）。
+            // 负数更坏：单价永远是正的（价目表那边 signum() > 0），负数量是唯一能把
+            // 明细做成负数的手法，能和别的明细**对冲**把总额压低，少付钱还判"付清了"。
+            assertThatThrownBy(() -> orderAppService.createOrder(STORE_A, 100L,
+                    OrderSource.STORE, List.of(new OrderItemCommand(1L, 1L, 0, null)),
+                    9L, OrderExtras.EMPTY, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessage("第 1 条明细数量必须为正整数");
+
+            assertThatThrownBy(() -> orderAppService.createOrder(STORE_A, 100L,
+                    OrderSource.STORE, List.of(new OrderItemCommand(1L, 1L, -3, null)),
+                    9L, OrderExtras.EMPTY, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessage("第 1 条明细数量必须为正整数");
+
+            // 序号 = 下标 + 1，与上面那条同一个规矩：坏的是第 2 条就必须报 2
+            assertThatThrownBy(() -> orderAppService.createOrder(STORE_A, 100L,
+                    OrderSource.STORE,
+                    List.of(new OrderItemCommand(1L, 1L, 2, null),
+                            new OrderItemCommand(1L, 1L, 0, null)),
+                    9L, OrderExtras.EMPTY, null))
+                    .isInstanceOf(BusinessException.class)
+                    .hasMessage("第 2 条明细数量必须为正整数");
+
+            verify(orderRepository, never()).save(any());
+            verify(priceRepository, never()).findPricesByCategoryIds(any());
+        }
+
+        @Test
+        @DisplayName("对照：数量 1 是最小合法值（闸没做成「只许 ≥2」）")
+        void quantityOneStillWorks() {
+            Result<OrderView> result = orderAppService.createOrder(STORE_A, 100L,
+                    OrderSource.STORE, List.of(new OrderItemCommand(1L, 1L, 1, null)),
+                    9L, OrderExtras.EMPTY, null);
+
+            assertThat(result.code()).isEqualTo(200);
+        }
     }
 
     // ════════════════ 网单门店校验 ════════════════
