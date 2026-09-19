@@ -10,7 +10,7 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { personaPaths } from '../../../router'
 import {
-  listStaff, createStaff, updateStaff, resetStaffPassword, updateStaffStatus,
+  listStaff, getStaff, createStaff, updateStaff, resetStaffPassword, updateStaffStatus,
 } from '../../../api/staff'
 import { listAllStores } from '../../../api/store'
 import { staffLogout } from '../../../api/auth'
@@ -74,21 +74,43 @@ function openCreate() {
   panel.value = 'create'
 }
 
-function openEdit(row) {
+/** 用一份 StaffView 填编辑表单 —— 名册行与 `/api/staff/{id}` 的返回体同形，两处共用 */
+function fillEditForm(v) {
   form.value = {
-    username: row.username, // 只读展示用
+    username: v.username, // 只读展示用
     password: '',
-    name: row.name || '',
+    name: v.name || '',
     // 返回体里的 role 是**名字**（'ADMIN'/'MANAGER'），下拉要的是**数字** ——
     // 同一个概念两种形态，写反了不报错，只会静悄悄把角色改成另一个
-    role: row.role === 'ADMIN' ? 0 : 1,
-    storeId: row.storeId == null ? '' : row.storeId,
-    phone: row.phone || '',
+    role: v.role === 'ADMIN' ? 0 : 1,
+    storeId: v.storeId == null ? '' : v.storeId,
+    phone: v.phone || '',
   }
-  target.value = row
+  target.value = v
+}
+
+function openEdit(row) {
+  fillEditForm(row) // 先用名册行把面板开出来（不等后端，点了就有）
   formError.value = ''
   formOk.value = ''
   panel.value = 'edit'
+  loadFresh(row) // 再去取权威快照覆盖一次
+}
+
+/** 名册可能是旧的（别的管理员刚改过、或本页开着一直没刷新），而 PUT 交的是**整份快照** ——
+ *  拿旧值回写，会把别人刚改的字段悄悄改回去。所以打开面板时补读一次详情。
+ *  `/api/staff/{id}` 这个端点的唯一消费者就是这里（此前它整条是断的：接口活着、
+ *  包装函数写好了、没人 import —— 2026-09-19 接上） */
+async function loadFresh(row) {
+  try {
+    const fresh = await getStaff(row.id)
+    // 这一趟往返期间用户可能已经切到别人、或把面板收了 —— 那就别覆盖了。
+    // （慢网络下还有个更小的窗口：他刚敲进去的字会被这次覆盖掉。取舍是
+    //   "点了就有"优先 —— 详情是本机回环，正常在几十毫秒内到） */
+    if (panel.value === 'edit' && target.value?.id === row.id) fillEditForm(fresh)
+  } catch (e) {
+    formError.value = e.message
+  }
 }
 
 function openReset(row) {
