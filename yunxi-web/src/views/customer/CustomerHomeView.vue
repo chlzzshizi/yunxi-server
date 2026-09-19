@@ -96,6 +96,8 @@ onUnmounted(() => {
       <h4 class="mb-0">领券中心</h4>
       <div class="d-flex gap-2 align-items-center">
         <span class="text-body-secondary small">手机尾号 {{ phone.slice(-4) }} 的顾客</span>
+        <router-link to="/customer/coupons" class="btn btn-outline-primary btn-sm">我的券</router-link>
+        <router-link to="/customer/profile" class="btn btn-outline-primary btn-sm">个人中心</router-link>
         <router-link to="/" class="btn btn-outline-primary btn-sm">首页</router-link>
         <button class="btn btn-outline-danger btn-sm" @click="onLogout">退出</button>
       </div>

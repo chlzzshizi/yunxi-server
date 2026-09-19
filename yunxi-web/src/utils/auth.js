@@ -23,10 +23,14 @@ export function decodeToken(token) {
   return JSON.parse(decodeBase64Url(parts[1]))
 }
 
-/** 登录成功后保存会话：token + 解码后的 claims 快照（快照避免每次读都解一遍） */
+/** 登录成功后保存会话：token + 解码后的 claims 快照（快照避免每次读都解一遍）。
+ *  **返回**存进去的那份会话 —— 登录页要拿 claims 去问"该落到哪一页"（见 router 的 homeFor），
+ *  让它自己再解一次 token 就多了一份会跟这里走散的副本 */
 export function saveSession(persona, token) {
   const claims = decodeToken(token) // 解不开说明后端签了坏 token，尽早暴露
-  localStorage.setItem(KEY[persona], JSON.stringify({ token, claims }))
+  const session = { token, claims }
+  localStorage.setItem(KEY[persona], JSON.stringify(session))
+  return session
 }
 
 /** 读会话；校验 ①claims.type 与槽位一致 ②未过期（exp 单位是秒）。
@@ -47,4 +51,17 @@ export function loadSession(persona) {
 
 export function clearSession(persona) {
   localStorage.removeItem(KEY[persona])
+}
+
+// ── 员工角色 ──
+// 码与后端 StaffRole 同一个表（0=ADMIN 管理员 / 1=MANAGER 店长），**只读不写死判断**。
+// 前端读 role 只为一件事：登录后落到哪一页（router.homeFor）。
+// **不用它藏按钮** —— 真拦人靠后端（JwtInterceptor.checkRoleGate），
+// 前端藏了也只是"少点一次"，而一旦口径对不上就会变成"店长看不到自己的功能"。
+export const STAFF_ROLE_ADMIN = 0
+
+/** 这个会话是不是管理员？null / 字段缺失一律当"不是"（失败侧保守：
+ *  宁可把管理员当店长，也别把店长当管理员放进管理页） */
+export function isAdminSession(session) {
+  return session?.claims?.role === STAFF_ROLE_ADMIN
 }

@@ -1,5 +1,5 @@
 <script setup>
-// 首页：身份选择 —— 员工端（店长发券） / 顾客端（注册抢券）
+// 首页：身份选择 —— 员工端（店长：订单/定价/发券 · 管理员：员工与门店） / 顾客端（注册抢券）
 </script>
 
 <template>
@@ -16,7 +16,7 @@
                 <div class="card-body">
                   <div class="display-6 mb-2">🛠️</div>
                   <h5>员工端</h5>
-                  <p class="text-body-secondary small mb-3">店长登录 · 发布折扣券 · 查看库存</p>
+                  <p class="text-body-secondary small mb-3">店长：订单 / 定价 / 发券 · 管理员：员工与门店</p>
                   <router-link to="/staff/login" class="btn btn-primary w-100">
                     员工入口
                   </router-link>

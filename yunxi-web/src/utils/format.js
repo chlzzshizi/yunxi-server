@@ -87,3 +87,36 @@ export const ONLINE_PAY_OPTIONS = [
   { code: 'wechat', text: '微信支付' },
   { code: 'alipay', text: '支付宝' },
 ]
+
+// ──────────────── 员工 / 门店域（管理员专区，2026-09-19 补）────────────────
+
+/** 员工角色（`StaffView.role`）→ 徽章 + 文案。
+ *  **键是枚举名**（'ADMIN' / 'MANAGER'）不是数字 —— 返回体口径，和订单状态同一个坑：
+ *  而**请求参数**里的 role 要的是数字（见 STAFF_ROLE_OPTIONS） */
+export const STAFF_ROLE_BADGE = {
+  ADMIN: { cls: 'text-bg-dark', text: '管理员' },
+  MANAGER: { cls: 'text-bg-primary', text: '店长' },
+}
+
+/** 角色下拉。`value` **直接就是要发出去的参数值**（数字，不是枚举名）。
+ *
+ *  **店长排第一**：下拉默认选中第一项，而"建个新员工"的常态是店长，管理员是少数。
+ *  更要紧的是**不能有空选项** —— `<option value="">` 配上 `Number('') === 0`
+ *  会静悄悄建出一个**管理员**（0 就是 ADMIN）。这张表最容易出事故的地方就在这。 */
+export const STAFF_ROLE_OPTIONS = [
+  { value: 1, text: '店长' },
+  { value: 0, text: '管理员' },
+]
+
+/** 员工状态（整数，不是枚举）→ 徽章。文案是**启用/停用** */
+export const STAFF_STATUS_BADGE = {
+  1: { cls: 'text-bg-success', text: '启用' },
+  0: { cls: 'text-bg-secondary', text: '停用' },
+}
+
+/** 门店状态（整数）→ 徽章。文案是**营业/停业** —— 和员工那组不同，
+ *  后端的报错文案也是这么分的（"状态只能是 0(停业) 或 1(营业)"） */
+export const STORE_STATUS_BADGE = {
+  1: { cls: 'text-bg-success', text: '营业' },
+  0: { cls: 'text-bg-secondary', text: '停业' },
+}
