@@ -2853,8 +2853,6 @@ async function loadFresh(row) {
 
 ## 汇总
 
-## 汇总
-
 | Bug | 层 | 类型 | 一句话 |
 |---|---|---|---|
 | 1 | Infrastructure | INSERT/UPDATE 未区分 | `save()` 对新老数据都执行 INSERT |
